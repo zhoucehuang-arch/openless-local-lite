@@ -25,10 +25,6 @@ pub enum HotkeyEvent {
     Pressed,
     Released,
     Cancelled,
-    /// Shift（或未来配置项指定的修饰键）按下边沿。可在录音过程中任何时刻产生；
-    /// 上层据此切换到翻译输出管线。详见 issue #4。
-    TranslationModifierPressed,
-    QaShortcutPressed,
 }
 
 #[cfg(test)]
@@ -40,11 +36,6 @@ mod tests {
         Shared {
             binding: RwLock::new(HotkeyBinding::default()),
             trigger_held: AtomicBool::new(true),
-            qa_trigger: RwLock::new(None),
-            qa_trigger_held: AtomicBool::new(true),
-            translation_trigger: RwLock::new(None),
-            translation_trigger_held: AtomicBool::new(true),
-            translation_modifier_held: AtomicBool::new(true),
         }
     }
 
@@ -54,9 +45,6 @@ mod tests {
         reset_shared_held_state(&shared);
 
         assert!(!shared.trigger_held.load(Ordering::SeqCst));
-        assert!(!shared.qa_trigger_held.load(Ordering::SeqCst));
-        assert!(!shared.translation_trigger_held.load(Ordering::SeqCst));
-        assert!(!shared.translation_modifier_held.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -72,41 +60,12 @@ mod tests {
 
         assert_eq!(*shared.binding.read(), next);
         assert!(!shared.trigger_held.load(Ordering::SeqCst));
-        assert!(shared.qa_trigger_held.load(Ordering::SeqCst));
-        assert!(shared.translation_trigger_held.load(Ordering::SeqCst));
-        assert!(shared.translation_modifier_held.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn update_modifier_shortcuts_resets_only_modifier_latches() {
-        let shared = shared_with_held_latches();
-
-        update_shared_modifier_shortcuts(
-            &shared,
-            Some(HotkeyTrigger::RightCommand),
-            Some(HotkeyTrigger::LeftOption),
-        );
-
-        assert_eq!(*shared.qa_trigger.read(), Some(HotkeyTrigger::RightCommand));
-        assert_eq!(
-            *shared.translation_trigger.read(),
-            Some(HotkeyTrigger::LeftOption)
-        );
-        assert!(shared.trigger_held.load(Ordering::SeqCst));
-        assert!(!shared.qa_trigger_held.load(Ordering::SeqCst));
-        assert!(!shared.translation_trigger_held.load(Ordering::SeqCst));
-        assert!(shared.translation_modifier_held.load(Ordering::SeqCst));
     }
 }
 
 pub trait HotkeyAdapter: Send + Sync {
     fn kind(&self) -> HotkeyAdapterKind;
     fn update_binding(&self, binding: HotkeyBinding);
-    fn update_modifier_shortcuts(
-        &self,
-        qa_trigger: Option<HotkeyTrigger>,
-        translation_trigger: Option<HotkeyTrigger>,
-    );
     fn reset_held_state(&self);
     fn shutdown(&self) {}
 }
@@ -115,13 +74,6 @@ struct Shared {
     binding: RwLock<HotkeyBinding>,
     /// 触发键当前是否处于"按住"状态。OS 自动重复事件用此去重。
     trigger_held: AtomicBool,
-    qa_trigger: RwLock<Option<HotkeyTrigger>>,
-    qa_trigger_held: AtomicBool,
-    translation_trigger: RwLock<Option<HotkeyTrigger>>,
-    translation_trigger_held: AtomicBool,
-    /// Shift（翻译修饰键）当前是否按住。用于在 FLAGS_CHANGED 上识别 down 边沿
-    /// （只在 false → true 时往上层发 TranslationModifierPressed）。详见 issue #4。
-    translation_modifier_held: AtomicBool,
 }
 
 pub struct HotkeyMonitor {
@@ -143,15 +95,6 @@ impl HotkeyMonitor {
 
     pub fn update_binding(&self, binding: HotkeyBinding) {
         self.adapter.update_binding(binding);
-    }
-
-    pub fn update_modifier_shortcuts(
-        &self,
-        qa_trigger: Option<HotkeyTrigger>,
-        translation_trigger: Option<HotkeyTrigger>,
-    ) {
-        self.adapter
-            .update_modifier_shortcuts(qa_trigger, translation_trigger);
     }
 
     pub fn kind(&self) -> HotkeyAdapterKind {
@@ -207,11 +150,6 @@ where
     let shared = Arc::new(Shared {
         binding: RwLock::new(binding),
         trigger_held: AtomicBool::new(false),
-        qa_trigger: RwLock::new(None),
-        qa_trigger_held: AtomicBool::new(false),
-        translation_trigger: RwLock::new(None),
-        translation_trigger_held: AtomicBool::new(false),
-        translation_modifier_held: AtomicBool::new(false),
     });
 
     let thread_shared = Arc::clone(&shared);
@@ -235,33 +173,9 @@ fn update_shared_binding(shared: &Shared, binding: HotkeyBinding) {
         .store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
-fn update_shared_modifier_shortcuts(
-    shared: &Shared,
-    qa_trigger: Option<HotkeyTrigger>,
-    translation_trigger: Option<HotkeyTrigger>,
-) {
-    *shared.qa_trigger.write() = qa_trigger;
-    *shared.translation_trigger.write() = translation_trigger;
-    shared
-        .qa_trigger_held
-        .store(false, std::sync::atomic::Ordering::SeqCst);
-    shared
-        .translation_trigger_held
-        .store(false, std::sync::atomic::Ordering::SeqCst);
-}
-
 fn reset_shared_held_state(shared: &Shared) {
     shared
         .trigger_held
-        .store(false, std::sync::atomic::Ordering::SeqCst);
-    shared
-        .qa_trigger_held
-        .store(false, std::sync::atomic::Ordering::SeqCst);
-    shared
-        .translation_trigger_held
-        .store(false, std::sync::atomic::Ordering::SeqCst);
-    shared
-        .translation_modifier_held
         .store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
@@ -276,10 +190,9 @@ mod platform {
 
     use super::{
         install_error, reset_shared_held_state, send_or_log, start_listener_thread,
-        update_shared_binding, update_shared_modifier_shortcuts, HotkeyAdapter, HotkeyEvent,
-        Shared, StartupTx,
+        update_shared_binding, HotkeyAdapter, HotkeyEvent, Shared, StartupTx,
     };
-    use crate::types::{HotkeyAdapterKind, HotkeyBinding, HotkeyInstallError, HotkeyTrigger};
+    use crate::types::{HotkeyAdapterKind, HotkeyBinding, HotkeyInstallError};
 
     pub fn start_adapter(
         binding: HotkeyBinding,
@@ -327,14 +240,6 @@ mod platform {
 
         fn update_binding(&self, binding: HotkeyBinding) {
             update_shared_binding(&self.shared, binding);
-        }
-
-        fn update_modifier_shortcuts(
-            &self,
-            qa_trigger: Option<HotkeyTrigger>,
-            translation_trigger: Option<HotkeyTrigger>,
-        ) {
-            update_shared_modifier_shortcuts(&self.shared, qa_trigger, translation_trigger);
         }
 
         fn reset_held_state(&self) {
@@ -530,39 +435,7 @@ mod platform {
 
     fn handle_flags_changed(ctx: &CallbackContext, event: CgEventRef) {
         let flags = unsafe { CGEventGetFlags(event) };
-
-        // Shift 是翻译模式修饰键 — 与触发键的 keycode 检查独立，任何时刻按 Shift 都生效。
-        let shift_active = (flags & FLAG_MASK_SHIFT) != 0;
-        let shift_was_held = ctx.shared.translation_modifier_held.load(Ordering::SeqCst);
-        if shift_active && !shift_was_held {
-            ctx.shared
-                .translation_modifier_held
-                .store(true, Ordering::SeqCst);
-            send_or_log(&ctx.tx, HotkeyEvent::TranslationModifierPressed);
-        } else if !shift_active && shift_was_held {
-            ctx.shared
-                .translation_modifier_held
-                .store(false, Ordering::SeqCst);
-        }
-
         let keycode = unsafe { CGEventGetIntegerValueField(event, KEYBOARD_EVENT_KEYCODE) };
-        handle_optional_modifier_trigger(
-            ctx,
-            keycode,
-            flags,
-            *ctx.shared.qa_trigger.read(),
-            &ctx.shared.qa_trigger_held,
-            HotkeyEvent::QaShortcutPressed,
-        );
-        handle_optional_modifier_trigger(
-            ctx,
-            keycode,
-            flags,
-            *ctx.shared.translation_trigger.read(),
-            &ctx.shared.translation_trigger_held,
-            HotkeyEvent::TranslationModifierPressed,
-        );
-
         let trigger = ctx.shared.binding.read().trigger;
         if trigger == HotkeyTrigger::Custom {
             return;
@@ -581,30 +454,6 @@ mod platform {
         } else if !is_active && was_held {
             ctx.shared.trigger_held.store(false, Ordering::SeqCst);
             send_or_log(&ctx.tx, HotkeyEvent::Released);
-        }
-    }
-
-    fn handle_optional_modifier_trigger(
-        ctx: &CallbackContext,
-        keycode: i64,
-        flags: CgEventFlags,
-        trigger: Option<HotkeyTrigger>,
-        held: &std::sync::atomic::AtomicBool,
-        event: HotkeyEvent,
-    ) {
-        let Some(trigger) = trigger else {
-            return;
-        };
-        if trigger == HotkeyTrigger::Custom || keycode != trigger_to_keycode(trigger) {
-            return;
-        }
-        let active = (flags & trigger_to_flag_mask(trigger)) != 0;
-        let was_held = held.load(Ordering::SeqCst);
-        if active && !was_held {
-            held.store(true, Ordering::SeqCst);
-            send_or_log(&ctx.tx, event);
-        } else if !active && was_held {
-            held.store(false, Ordering::SeqCst);
         }
     }
 
@@ -654,11 +503,6 @@ mod platform {
                     keys: None,
                 }),
                 trigger_held: AtomicBool::new(false),
-                qa_trigger: RwLock::new(None),
-                qa_trigger_held: AtomicBool::new(false),
-                translation_trigger: RwLock::new(None),
-                translation_trigger_held: AtomicBool::new(false),
-                translation_modifier_held: AtomicBool::new(false),
             })
         }
 
@@ -681,52 +525,7 @@ mod platform {
             rx.try_iter().collect()
         }
 
-        #[test]
-        fn mac_optional_modifier_edges_are_deduped_from_mock_flags() {
-            let shared = shared(HotkeyTrigger::RightControl);
-            let (ctx, rx) = callback_context(Arc::clone(&shared));
 
-            handle_optional_modifier_trigger(
-                &ctx,
-                trigger_to_keycode(HotkeyTrigger::RightCommand),
-                trigger_to_flag_mask(HotkeyTrigger::RightCommand),
-                Some(HotkeyTrigger::RightCommand),
-                &shared.qa_trigger_held,
-                HotkeyEvent::QaShortcutPressed,
-            );
-            handle_optional_modifier_trigger(
-                &ctx,
-                trigger_to_keycode(HotkeyTrigger::RightCommand),
-                trigger_to_flag_mask(HotkeyTrigger::RightCommand),
-                Some(HotkeyTrigger::RightCommand),
-                &shared.qa_trigger_held,
-                HotkeyEvent::QaShortcutPressed,
-            );
-            handle_optional_modifier_trigger(
-                &ctx,
-                trigger_to_keycode(HotkeyTrigger::RightCommand),
-                0,
-                Some(HotkeyTrigger::RightCommand),
-                &shared.qa_trigger_held,
-                HotkeyEvent::QaShortcutPressed,
-            );
-            handle_optional_modifier_trigger(
-                &ctx,
-                trigger_to_keycode(HotkeyTrigger::RightCommand),
-                trigger_to_flag_mask(HotkeyTrigger::RightCommand),
-                Some(HotkeyTrigger::RightCommand),
-                &shared.qa_trigger_held,
-                HotkeyEvent::QaShortcutPressed,
-            );
-
-            assert_eq!(
-                drain(&rx),
-                vec![
-                    HotkeyEvent::QaShortcutPressed,
-                    HotkeyEvent::QaShortcutPressed,
-                ]
-            );
-        }
     }
 }
 
@@ -749,8 +548,7 @@ mod platform {
 
     use super::{
         install_error, reset_shared_held_state, send_or_log, start_listener_thread,
-        update_shared_binding, update_shared_modifier_shortcuts, HotkeyAdapter, HotkeyEvent,
-        Shared, StartupTx,
+        update_shared_binding, HotkeyAdapter, HotkeyEvent, Shared, StartupTx,
     };
     use crate::types::{HotkeyAdapterKind, HotkeyBinding, HotkeyInstallError, HotkeyTrigger};
 
@@ -760,9 +558,6 @@ mod platform {
     const WM_SYSKEYUP: usize = 0x0105;
 
     const VK_ESCAPE: u32 = 0x1B;
-    const VK_SHIFT: u32 = 0x10;
-    const VK_LSHIFT: u32 = 0xA0;
-    const VK_RSHIFT: u32 = 0xA1;
     const VK_LCONTROL: u32 = 0xA2;
     const VK_RCONTROL: u32 = 0xA3;
     const VK_LMENU: u32 = 0xA4;
@@ -802,14 +597,6 @@ mod platform {
 
         fn update_binding(&self, binding: HotkeyBinding) {
             update_shared_binding(&self.shared, binding);
-        }
-
-        fn update_modifier_shortcuts(
-            &self,
-            qa_trigger: Option<HotkeyTrigger>,
-            translation_trigger: Option<HotkeyTrigger>,
-        ) {
-            update_shared_modifier_shortcuts(&self.shared, qa_trigger, translation_trigger);
         }
 
         fn reset_held_state(&self) {
@@ -921,44 +708,6 @@ mod platform {
         }
 
         // Shift（任一侧）= 翻译模式修饰键。在录音过程中任意时刻按下都生效。详见 issue #4。
-        if matches!(vk_code, VK_SHIFT | VK_LSHIFT | VK_RSHIFT) {
-            match message {
-                WM_KEYDOWN | WM_SYSKEYDOWN => {
-                    let was_held = ctx
-                        .shared
-                        .translation_modifier_held
-                        .swap(true, Ordering::SeqCst);
-                    if !was_held {
-                        send_or_log(&ctx.tx, HotkeyEvent::TranslationModifierPressed);
-                    }
-                }
-                WM_KEYUP | WM_SYSKEYUP => {
-                    ctx.shared
-                        .translation_modifier_held
-                        .store(false, Ordering::SeqCst);
-                }
-                _ => {}
-            }
-            return false;
-        }
-
-        handle_optional_modifier_trigger(
-            ctx,
-            vk_code,
-            message,
-            *ctx.shared.qa_trigger.read(),
-            &ctx.shared.qa_trigger_held,
-            HotkeyEvent::QaShortcutPressed,
-        );
-        handle_optional_modifier_trigger(
-            ctx,
-            vk_code,
-            message,
-            *ctx.shared.translation_trigger.read(),
-            &ctx.shared.translation_trigger_held,
-            HotkeyEvent::TranslationModifierPressed,
-        );
-
         let trigger = ctx.shared.binding.read().trigger;
         if trigger == HotkeyTrigger::Custom {
             return false;
@@ -985,34 +734,6 @@ mod platform {
             _ => {}
         }
         true
-    }
-
-    fn handle_optional_modifier_trigger(
-        ctx: &CallbackContext,
-        vk_code: u32,
-        message: usize,
-        trigger: Option<HotkeyTrigger>,
-        held: &std::sync::atomic::AtomicBool,
-        event: HotkeyEvent,
-    ) {
-        let Some(trigger) = trigger else {
-            return;
-        };
-        if trigger == HotkeyTrigger::Custom || vk_code != trigger_to_vk_code(trigger) {
-            return;
-        }
-        match message {
-            WM_KEYDOWN | WM_SYSKEYDOWN => {
-                let was_held = held.swap(true, Ordering::SeqCst);
-                if !was_held {
-                    send_or_log(&ctx.tx, event);
-                }
-            }
-            WM_KEYUP | WM_SYSKEYUP => {
-                held.store(false, Ordering::SeqCst);
-            }
-            _ => {}
-        }
     }
 
     fn trigger_to_vk_code(trigger: HotkeyTrigger) -> u32 {
@@ -1049,11 +770,6 @@ mod platform {
                     keys: None,
                 }),
                 trigger_held: AtomicBool::new(false),
-                qa_trigger: RwLock::new(None),
-                qa_trigger_held: AtomicBool::new(false),
-                translation_trigger: RwLock::new(None),
-                translation_trigger_held: AtomicBool::new(false),
-                translation_modifier_held: AtomicBool::new(false),
             })
         }
 
@@ -1106,32 +822,6 @@ mod platform {
                     HotkeyEvent::Pressed,
                     HotkeyEvent::Released,
                     HotkeyEvent::Pressed
-                ]
-            );
-        }
-
-        #[test]
-        fn windows_optional_modifier_shortcuts_use_independent_latches() {
-            let shared = shared(HotkeyTrigger::RightControl);
-            *shared.qa_trigger.write() = Some(HotkeyTrigger::RightCommand);
-            *shared.translation_trigger.write() = Some(HotkeyTrigger::LeftOption);
-            let (ctx, rx) = callback_context(shared);
-
-            dispatch_keyboard_event(&ctx, VK_RWIN, WM_KEYDOWN);
-            dispatch_keyboard_event(&ctx, VK_RWIN, WM_KEYDOWN);
-            dispatch_keyboard_event(&ctx, VK_LMENU, WM_KEYDOWN);
-            dispatch_keyboard_event(&ctx, VK_LSHIFT, WM_KEYDOWN);
-            dispatch_keyboard_event(&ctx, VK_LSHIFT, WM_KEYDOWN);
-            dispatch_keyboard_event(&ctx, VK_RWIN, WM_KEYUP);
-            dispatch_keyboard_event(&ctx, VK_RWIN, WM_KEYDOWN);
-
-            assert_eq!(
-                drain(&rx),
-                vec![
-                    HotkeyEvent::QaShortcutPressed,
-                    HotkeyEvent::TranslationModifierPressed,
-                    HotkeyEvent::TranslationModifierPressed,
-                    HotkeyEvent::QaShortcutPressed,
                 ]
             );
         }
@@ -1217,15 +907,6 @@ mod platform {
 
         fn update_binding(&self, _binding: HotkeyBinding) {
             // fcitx5 插件热键由 sync_binding_to_plugin 单独同步。
-        }
-
-        fn update_modifier_shortcuts(
-            &self,
-            qa_trigger: Option<HotkeyTrigger>,
-            translation_trigger: Option<HotkeyTrigger>,
-        ) {
-            crate::linux_fcitx::sync_qa_binding(qa_trigger);
-            crate::linux_fcitx::sync_translation_binding(translation_trigger);
         }
 
         fn reset_held_state(&self) {}

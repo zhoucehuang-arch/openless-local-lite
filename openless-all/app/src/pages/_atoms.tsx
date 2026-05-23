@@ -1,6 +1,4 @@
 // _atoms.tsx — shared display atoms used across the page bodies.
-// Ported verbatim from design_handoff_openless/pages.jsx (PageHeader, Card,
-// Pill, Btn). Inline styles preserved 1:1.
 
 import { useState, type CSSProperties, type ReactNode } from 'react';
 import { Icon } from '../components/Icon';

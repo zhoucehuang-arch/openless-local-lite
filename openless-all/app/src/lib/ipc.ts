@@ -9,31 +9,23 @@ import type {
     DictationSession,
     DictionaryEntry,
     HotkeyCapability,
-    MarketplaceDetail,
-    MarketplaceListItem,
-    MarketplaceMyPackItem,
     HotkeyStatus,
     MicrophoneDevice,
     PermissionStatus,
     PolishMode,
-    QaHotkeyBinding,
     ShortcutBinding,
     StylePack,
     StylePackExample,
     StylePackKind,
     StylePackRuntimeDiagnostics,
     StyleSystemPrompts,
-    UpdateChannel,
     UserPreferences,
     VocabPresetStore,
     WindowsImeStatus,
 } from "./types"
-export type { UpdateChannel } from "./types"
 import { OL_DATA } from "./mockData"
 import {
     defaultAppShortcutModifiers,
-    defaultQaShortcut,
-    formatComboLabel,
 } from "./hotkey"
 
 declare global {
@@ -87,13 +79,9 @@ let mockSettings: UserPreferences = {
     pasteShortcut: "ctrlV",
     allowNonTsfInsertionFallback: true,
     workingLanguages: ["简体中文"],
-    translationTargetLanguage: "",
-    qaHotkey: defaultQaShortcut(),
     chineseScriptPreference: "auto",
     outputLanguagePreference: "auto",
-    qaSaveHistory: false,
     customComboHotkey: null,
-    translationHotkey: { primary: "Shift", modifiers: [] },
     switchStyleHotkey: {
         primary: "S",
         modifiers: defaultAppShortcutModifiers(),
@@ -112,16 +100,12 @@ let mockSettings: UserPreferences = {
     historyRetentionDays: 7,
     polishContextWindowMinutes: 5,
     startMinimized: false,
-    updateChannel: "stable",
     streamingInsert: true,
     streamingInsertDefaultMigrated: true,
     streamingInsertSaveClipboard: true,
-    autoUpdateCheck: true,
     historyMaxEntries: null,
     recordAudioForDebug: false,
     audioRecordingMaxEntries: null,
-    marketplaceBaseUrl: "https://apic.openless.top",
-    marketplaceDevLogin: "",
 }
 
 const mockFullStylePrompts: StyleSystemPrompts = {
@@ -518,34 +502,6 @@ export function setSettings(prefs: UserPreferences): Promise<void> {
         syncMockSettingsFromStylePacks()
         return undefined
     })
-}
-
-// ── Release channel (Beta opt-in) ──────────────────────────────────────
-// 渠道偏好与 fetch_latest_beta_release 实际效果只在 Tauri runtime 内有意义；
-// 浏览器开发模式下走 mock，避免设置页因 invoke 抛错而白屏。
-// UpdateChannel 类型搬到 types.ts（UserPreferences.updateChannel 字段使用），
-// 这里 re-export 保持外部模块（SettingsModal 等）import 路径不变。
-
-export interface LatestBetaRelease {
-    tagName: string
-    htmlUrl: string
-    publishedAt: string
-}
-
-export function getUpdateChannel(): Promise<UpdateChannel> {
-    return invokeOrMock(
-        "get_update_channel",
-        undefined,
-        () => "stable" as UpdateChannel,
-    )
-}
-
-export function setUpdateChannel(channel: UpdateChannel): Promise<void> {
-    return invokeOrMock("set_update_channel", { channel }, () => undefined)
-}
-
-export function fetchLatestBetaRelease(): Promise<LatestBetaRelease | null> {
-    return invokeOrMock("fetch_latest_beta_release", undefined, () => null)
 }
 
 export function getHotkeyStatus(): Promise<HotkeyStatus> {
@@ -1048,27 +1004,6 @@ export function restartApp(): Promise<void> {
     return invokeOrMock("restart_app", undefined, () => undefined)
 }
 
-// ── QA (划词语音问答) ───────────────────────────────────────────────────
-// 详见 issue #118。后端会发 `qa:state` / `qa:dismiss` 事件；前端通过下面四个
-// 命令查询与控制 QA 浮窗。
-export function getQaHotkeyLabel(): Promise<string> {
-    return invokeOrMock("get_qa_hotkey_label", undefined, () =>
-        formatComboLabel(defaultQaShortcut()),
-    )
-}
-
-export function setQaHotkey(binding: QaHotkeyBinding | null): Promise<void> {
-    return invokeOrMock("set_qa_hotkey", { binding }, () => undefined)
-}
-
-export function qaWindowDismiss(): Promise<void> {
-    return invokeOrMock("qa_window_dismiss", undefined, () => undefined)
-}
-
-export function qaWindowPin(pinned: boolean): Promise<void> {
-    return invokeOrMock("qa_window_pin", { pinned }, () => undefined)
-}
-
 // ── Combo Hotkey (自定义录音组合键) ───────────────────────────────────
 export function validateComboHotkey(binding: ComboBinding): Promise<void> {
     return invokeOrMock("validate_combo_hotkey", { binding }, () => undefined)
@@ -1092,10 +1027,6 @@ export function setDictationHotkey(binding: ShortcutBinding): Promise<void> {
     return invokeOrMock("set_dictation_hotkey", { binding }, () => undefined)
 }
 
-export function setTranslationHotkey(binding: ShortcutBinding): Promise<void> {
-    return invokeOrMock("set_translation_hotkey", { binding }, () => undefined)
-}
-
 export function setSwitchStyleHotkey(binding: ShortcutBinding): Promise<void> {
     return invokeOrMock("set_switch_style_hotkey", { binding }, () => undefined)
 }
@@ -1110,15 +1041,6 @@ export function setShortcutRecordingActive(active: boolean): Promise<void> {
         { active },
         () => undefined,
     )
-}
-
-export async function openExternal(url: string): Promise<void> {
-    if (!isTauri) {
-        window.open(url, "_blank", "noopener,noreferrer")
-        return
-    }
-    const { open } = await import("@tauri-apps/plugin-shell")
-    await open(url)
 }
 
 /**
@@ -1146,306 +1068,3 @@ export async function exportErrorLog(
 }
 
 export { isTauri }
-
-// ── Marketplace (Phase A) ─────────────────────────────────────────────
-// 5 个 IPC wrapper —— marketplace-backend HTTP 通过 Rust IPC 转发。Mock fallback
-// 让 vite dev 在浏览器里也能预览 UI（返回空列表 / 假数据）。
-
-const MOCK_MARKETPLACE: MarketplaceListItem[] = [
-    {
-        id: "00000000-0000-0000-0000-000000000001",
-        slug: "demo-pack",
-        name: "示范风格包",
-        description: "Mock 数据 - vite dev 模式下显示",
-        authorLogin: "demo",
-        version: "1.0.0",
-        baseMode: "structured",
-        tags: ["demo"],
-        likeCount: 12,
-        downloadCount: 50,
-        publishedAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-    },
-]
-
-export function listMarketplace(
-    options: { query?: string; sort?: "new" | "popular"; limit?: number } = {},
-): Promise<MarketplaceListItem[]> {
-    return invokeOrMock("marketplace_list", options, () => MOCK_MARKETPLACE)
-}
-
-export function fetchMarketplaceDetail(
-    packId: string,
-): Promise<MarketplaceDetail> {
-    return invokeOrMock("marketplace_detail", { packId }, () => ({
-        ...MOCK_MARKETPLACE[0],
-        prompt: "# 角色\n你是测试用 polish 助手。\n\n# 任务\n按整体意图整理转写。",
-        state: "approved" as const,
-    }))
-}
-
-export function installMarketplacePack(packId: string): Promise<StylePack> {
-    return invokeOrMock(
-        "marketplace_install",
-        { packId },
-        () => mockStylePacks[0],
-    )
-}
-
-export function uploadMarketplacePack(
-    packId: string,
-    originPackId?: string | null,
-): Promise<{ id: string; state: string; message: string }> {
-    return invokeOrMock(
-        "marketplace_upload",
-        { packId, originPackId: originPackId ?? null },
-        () => ({
-            id: "mock-uploaded",
-            state: "pending",
-            message: "Mock 上传成功（vite dev）",
-        }),
-    )
-}
-
-export function likeMarketplacePack(
-    packId: string,
-): Promise<{ likeCount: number; alreadyLiked: boolean }> {
-    return invokeOrMock("marketplace_like", { packId }, () => ({
-        likeCount: 13,
-        alreadyLiked: false,
-    }))
-}
-
-/** 拉当前登录用户赞过的所有 pack id（用于红心 + 「我赞过的」过滤）。 */
-export function marketplaceMyLikes(): Promise<string[]> {
-    return invokeOrMock<string[]>("marketplace_my_likes", undefined, () => [])
-}
-
-/** 拉当前登录用户发布过的所有 pack（含审核中/已撤回），用于「我的发布」。 */
-export function marketplaceMyPacks(): Promise<MarketplaceMyPackItem[]> {
-    return invokeOrMock<MarketplaceMyPackItem[]>(
-        "marketplace_my_packs",
-        undefined,
-        () => [],
-    )
-}
-
-/** 撤回自己发布的 pack（后端软删 state='withdrawn'）。仅允许原作者。 */
-export function marketplaceDelete(packId: string): Promise<void> {
-    return invokeOrMock<void>("marketplace_delete", { packId }, () => undefined)
-}
-
-// ─────────────────────── GitHub OAuth Device Flow (Phase 1) ───────────────
-// 客户端直连 GitHub OAuth Device Flow 拿 login，自动写进 prefs.marketplaceDevLogin。
-// marketplace backend 不动（继续走 X-Dev-User header；Phase 2 才接 JWT 验证）。
-//
-// 后端 Rust 实现：commands.rs:github_device_flow_start / github_device_flow_poll
-// 需要预先配置 GITHUB_OAUTH_CLIENT_ID（OAuth App client_id，非敏感，可硬编码）。
-
-export interface GithubDeviceStartResponse {
-    deviceCode: string
-    userCode: string
-    verificationUri: string
-    interval: number
-    expiresIn: number
-}
-
-export type GithubDevicePollResult =
-    | { kind: "authorized"; login: string }
-    | { kind: "pending" }
-    | { kind: "slowDown" }
-    | { kind: "error"; message: string }
-
-export function githubDeviceFlowStart(): Promise<GithubDeviceStartResponse> {
-    return invokeOrMock<GithubDeviceStartResponse>(
-        "github_device_flow_start",
-        undefined,
-        () => ({
-            deviceCode: "mock-device-code-xxxxxxxx",
-            userCode: "MOCK-CODE",
-            verificationUri: "https://github.com/login/device",
-            interval: 5,
-            expiresIn: 900,
-        }),
-    )
-}
-
-export function githubDeviceFlowPoll(
-    deviceCode: string,
-): Promise<GithubDevicePollResult> {
-    return invokeOrMock<GithubDevicePollResult>(
-        "github_device_flow_poll",
-        { deviceCode },
-        () => ({
-            kind: "authorized" as const,
-            login: "mock-user",
-        }),
-    )
-}
-
-// ─────────────────────── Marketplace 差量缓存（localStorage） ────────────────
-//
-// 设计：两段式分发。
-// 1) List = 轻量元数据（id + version + updatedAt + 名称 / 计数 / tag），无 prompt 正文。
-//    本机持久化，重开 marketplace 秒呈现；后台 refresh 校准。
-// 2) Detail = 含 prompt 正文，按 (id, version, updatedAt) 三元组缓存。
-//    三元组等价于「内容版本签名」—— version+updatedAt 任一变化 = 内容变了 → 必须重拉。
-//    命中 = 复用本机，不发请求；未命中 = fetchMarketplaceDetail 再写回。
-// 3) 当 list 里某 pack 消失（被下架 / 撤回）或它的版本签名变了 → 驱逐对应 detail 缓存。
-//
-// 安全审查（防止恶意服务端 / 缓存投毒 / OOM）：
-// - ID 必须是 UUID v4（backend 已强制此约束；客户端镜像校验防 key 注入）。
-// - detail.id 必须与请求 packId 一致（防服务端返回错位内容）。
-// - 单条 detail 的 prompt 长度上限 200KB（防 OOM via 巨型注入）。
-// - detail 缓存条数上限 64，按 LRU 淘汰（防 localStorage 配额耗尽）。
-// - List items 在读取 / 写入时按合法 ID 过滤，丢弃格式异常项。
-
-const MARKETPLACE_LIST_CACHE_KEY = "ol-marketplace-list-cache-v2"
-const MARKETPLACE_DETAIL_CACHE_KEY = "ol-marketplace-detail-cache-v2"
-const MARKETPLACE_LIST_TTL_MS = 24 * 60 * 60 * 1000 // 24h —— list 本来变动稀，refresh 也会自动覆盖
-const MARKETPLACE_DETAIL_TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 天 —— detail 已经按版本三元组锁定，TTL 只是兜底
-const MARKETPLACE_DETAIL_MAX_ENTRIES = 64
-const MARKETPLACE_DETAIL_MAX_PROMPT_CHARS = 200_000
-
-const PACK_ID_RE =
-    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-
-function isValidMarketplacePackId(id: unknown): id is string {
-    return typeof id === "string" && PACK_ID_RE.test(id)
-}
-
-function detailCacheKey(
-    id: string,
-    version: string,
-    updatedAt: string,
-): string {
-    // version + updatedAt 任一字段为空也能拼出确定 key（refetch 会自然覆盖）。
-    return `${id}::${version ?? ""}::${updatedAt ?? ""}`
-}
-
-export function readMarketplaceListCache(): MarketplaceListItem[] | null {
-    try {
-        const raw = localStorage.getItem(MARKETPLACE_LIST_CACHE_KEY)
-        if (!raw) return null
-        const parsed = JSON.parse(raw) as {
-            items: MarketplaceListItem[]
-            ts: number
-        }
-        if (!parsed || !Array.isArray(parsed.items)) return null
-        if (Date.now() - parsed.ts > MARKETPLACE_LIST_TTL_MS) return null
-        return parsed.items.filter(
-            (it) => it && isValidMarketplacePackId(it.id),
-        )
-    } catch {
-        return null
-    }
-}
-
-export function writeMarketplaceListCache(items: MarketplaceListItem[]): void {
-    try {
-        const sanitized = items.filter(
-            (it) => it && isValidMarketplacePackId(it.id),
-        )
-        localStorage.setItem(
-            MARKETPLACE_LIST_CACHE_KEY,
-            JSON.stringify({ items: sanitized, ts: Date.now() }),
-        )
-        // 服务端最新视图里没有的 (id, version, updatedAt) 一律驱逐 ——
-        // 这是「云端哈希被移除时本机也移除」的执行点。
-        const keepKeys = new Set(
-            sanitized.map((it) =>
-                detailCacheKey(it.id, it.version ?? "", it.updatedAt ?? ""),
-            ),
-        )
-        pruneMarketplaceDetailCache(keepKeys)
-    } catch {
-        // quota exceeded / disabled — silent
-    }
-}
-
-type MarketplaceDetailCacheEntry = {
-    key: string
-    detail: MarketplaceDetail
-    ts: number
-}
-
-function readMarketplaceDetailStore(): Record<
-    string,
-    MarketplaceDetailCacheEntry
-> {
-    try {
-        const raw = localStorage.getItem(MARKETPLACE_DETAIL_CACHE_KEY)
-        if (!raw) return {}
-        const parsed = JSON.parse(raw) as Record<
-            string,
-            MarketplaceDetailCacheEntry
-        > | null
-        return parsed && typeof parsed === "object" ? parsed : {}
-    } catch {
-        return {}
-    }
-}
-
-function writeMarketplaceDetailStore(
-    store: Record<string, MarketplaceDetailCacheEntry>,
-): void {
-    try {
-        localStorage.setItem(
-            MARKETPLACE_DETAIL_CACHE_KEY,
-            JSON.stringify(store),
-        )
-    } catch {
-        // 配额耗尽 — 下次 read 时按 entries 数清理，命中失败会重新走网络。
-    }
-}
-
-export function readMarketplaceDetailCache(
-    packId: string,
-    version: string,
-    updatedAt: string,
-): MarketplaceDetail | null {
-    if (!isValidMarketplacePackId(packId)) return null
-    const store = readMarketplaceDetailStore()
-    const entry = store[detailCacheKey(packId, version, updatedAt)]
-    if (!entry) return null
-    if (Date.now() - entry.ts > MARKETPLACE_DETAIL_TTL_MS) return null
-    if (!entry.detail || entry.detail.id !== packId) return null
-    return entry.detail
-}
-
-export function writeMarketplaceDetailCache(detail: MarketplaceDetail): void {
-    if (!isValidMarketplacePackId(detail.id)) return
-    if (
-        typeof detail.prompt === "string" &&
-        detail.prompt.length > MARKETPLACE_DETAIL_MAX_PROMPT_CHARS
-    ) {
-        // 巨型 prompt 拒收 —— 防 OOM / 防服务端被攻陷后用大 payload 拖慢客户端。
-        return
-    }
-    const store = readMarketplaceDetailStore()
-    const key = detailCacheKey(
-        detail.id,
-        detail.version ?? "",
-        detail.updatedAt ?? "",
-    )
-    store[key] = { key, detail, ts: Date.now() }
-    // LRU: 旧的优先丢
-    const entries = Object.values(store).sort((a, b) => a.ts - b.ts)
-    while (entries.length > MARKETPLACE_DETAIL_MAX_ENTRIES) {
-        const oldest = entries.shift()
-        if (oldest) delete store[oldest.key]
-    }
-    writeMarketplaceDetailStore(store)
-}
-
-function pruneMarketplaceDetailCache(keepKeys: Set<string>): void {
-    const store = readMarketplaceDetailStore()
-    let changed = false
-    for (const key of Object.keys(store)) {
-        if (!keepKeys.has(key)) {
-            delete store[key]
-            changed = true
-        }
-    }
-    if (changed) writeMarketplaceDetailStore(store)
-}

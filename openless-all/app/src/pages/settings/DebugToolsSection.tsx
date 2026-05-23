@@ -82,17 +82,17 @@ export function DebugToolsSection() {
           disabled={!prefs.recordAudioForDebug}
         />
       </SettingRow>
-      <SettingRow label={t('modal.about.exportErrorLog')}>
+      <SettingRow label={t('settings.debug.exportErrorLog')}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <Btn variant="ghost" size="sm" disabled={exportStatus === 'busy'} onClick={onExportLog}>
-            {exportStatus === 'busy' ? t('modal.about.exporting') : t('modal.about.exportErrorLogBtn')}
+            {exportStatus === 'busy' ? t('settings.debug.exporting') : t('settings.debug.exportErrorLogBtn')}
           </Btn>
           {exportStatus === 'ok' && (
             <span
               style={{ fontSize: 11, color: 'var(--ol-ok)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 220 }}
               title={exportMessage}
             >
-              {t('modal.about.exportSuccess')}
+              {t('settings.debug.exportSuccess')}
             </span>
           )}
           {exportStatus === 'err' && (
@@ -100,7 +100,7 @@ export function DebugToolsSection() {
               style={{ fontSize: 11, color: 'var(--ol-err)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 220 }}
               title={exportMessage}
             >
-              {t('modal.about.exportFailed')}
+              {t('settings.debug.exportFailed')}
             </span>
           )}
         </div>

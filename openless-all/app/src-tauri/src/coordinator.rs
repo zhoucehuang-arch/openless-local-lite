@@ -8,7 +8,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::Instant;
 
 use chrono::Utc;
 use ferrous_opencc::{config::BuiltinConfig, OpenCC};
@@ -43,9 +42,7 @@ use crate::polish::{
     ActiveLLMProvider, CodexOAuthConfig, CodexOAuthLLMProvider, OpenAICompatibleConfig,
     OpenAICompatibleLLMProvider, CODEX_DEFAULT_MODEL, CODEX_OAUTH_PROVIDER_ID,
 };
-use crate::qa_hotkey::{QaHotkeyError, QaHotkeyEvent, QaHotkeyMonitor};
-use crate::recorder::{Recorder, RecorderError};
-use crate::selection::capture_selection;
+use crate::recorder::Recorder;
 #[cfg(target_os = "windows")]
 use crate::types::PasteShortcut;
 use crate::types::{
@@ -58,7 +55,6 @@ use crate::windows_ime_ipc::ImeSubmitTarget;
 use crate::windows_ime_session::{PreparedWindowsImeSession, WindowsImeSessionController};
 
 mod dictation;
-mod qa;
 mod resources;
 
 #[cfg(test)]
@@ -67,12 +63,11 @@ use dictation::{
     begin_session, cancel_session, end_session, handle_pressed, handle_pressed_edge,
     handle_released, handle_released_edge, request_stop_during_starting,
 };
-use qa::{close_qa_panel, handle_qa_hotkey_pressed, QaPhase, QaSessionState};
 #[cfg(test)]
 use resources::discard_startup_resources_for_session;
 use resources::{
     acquire_recording_mute, release_recording_mute, selected_microphone_device_name,
-    stop_microphone_preview_monitor, stop_qa_recorder, SessionResource, SharedRecordingMuteState,
+    stop_microphone_preview_monitor, SessionResource, SharedRecordingMuteState,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -210,30 +205,11 @@ struct Inner {
     /// 自定义组合键监听器（global-hotkey crate）。当 `prefs.hotkey.trigger == Custom` 时
     /// 代替 modifier-only 的 hotkey monitor。`None` 表示不使用自定义组合键或还没成功安装。
     combo_hotkey: Mutex<Option<ComboHotkeyMonitor>>,
-    translation_hotkey: Mutex<Option<ComboHotkeyMonitor>>,
     switch_style_hotkey: Mutex<Option<ComboHotkeyMonitor>>,
     open_app_hotkey: Mutex<Option<ComboHotkeyMonitor>>,
-    /// 翻译模式触发标志。每次 begin_session 重置为 false；hotkey 监听器在
-    /// Listening / Starting 阶段看到 Shift down 边沿时 set true。
-    /// end_session 在调 polish/translate 前读这个 flag + translation_target_language
-    /// 决定走哪条管线。详见 issue #4。
-    translation_modifier_seen: AtomicBool,
-    /// 划词语音问答（issue #118）：与 dictation hotkey 平行的全局快捷键
-    /// 监听器（global-hotkey crate）。`None` 表示功能关闭或还没成功安装。
-    qa_hotkey: Mutex<Option<QaHotkeyMonitor>>,
-    /// QA 单独的 session 状态，与 dictation 的 SessionPhase 不冲突。
-    qa_state: Mutex<QaSessionState>,
     /// 最近一次应用到 capsule 窗口的几何状态。避免录音 level tick 反复触发
     /// resize / reposition。
     capsule_layout: Mutex<Option<CapsuleLayoutState>>,
-    /// QA 用的 ASR 句柄（始终是 Volcengine 流式）。
-    qa_asr: Mutex<Option<Arc<VolcengineStreamingASR>>>,
-    /// QA 用的 Recorder 句柄。
-    qa_recorder: Mutex<Option<Recorder>>,
-    /// QA SSE 流取消标志。begin_qa_session 重置为 false；cancel_qa_session 设 true；
-    /// polish::chat_completion_history_streaming 的 loop 每帧检查，true 时 break loop
-    /// 避免取消后 LLM 仍 drain HTTP body 烧 token。详见 issue #161。
-    qa_stream_cancelled: Arc<AtomicBool>,
     /// Coordinator 退出信号。各 hotkey supervisor loop 在每轮重试 sleep 之前会检查
     /// 此 flag；为 true 时 loop 立刻 return。生产场景里 process exit 一并 reap 所有
     /// supervisor 线程，但 integration test 和未来 RunEvent::Exit 钩子需要这条
@@ -295,16 +271,9 @@ impl Coordinator {
                     last_hotkey_dispatch_at: Mutex::new(None),
                     shortcut_recording_active: AtomicBool::new(false),
                     combo_hotkey: Mutex::new(None),
-                    translation_hotkey: Mutex::new(None),
                     switch_style_hotkey: Mutex::new(None),
                     open_app_hotkey: Mutex::new(None),
-                    translation_modifier_seen: AtomicBool::new(false),
-                    qa_hotkey: Mutex::new(None),
-                    qa_state: Mutex::new(QaSessionState::default()),
                     capsule_layout: Mutex::new(None),
-                    qa_asr: Mutex::new(None),
-                    qa_recorder: Mutex::new(None),
-                    qa_stream_cancelled: Arc::new(AtomicBool::new(false)),
                     local_asr_cache: Arc::new(crate::asr::local::LocalAsrCache::new()),
                     shutdown: AtomicBool::new(false),
                 }),
@@ -356,16 +325,9 @@ impl Coordinator {
                 last_hotkey_dispatch_at: Mutex::new(None),
                 shortcut_recording_active: AtomicBool::new(false),
                 combo_hotkey: Mutex::new(None),
-                translation_hotkey: Mutex::new(None),
                 switch_style_hotkey: Mutex::new(None),
                 open_app_hotkey: Mutex::new(None),
-                translation_modifier_seen: AtomicBool::new(false),
-                qa_hotkey: Mutex::new(None),
-                qa_state: Mutex::new(QaSessionState::default()),
                 capsule_layout: Mutex::new(None),
-                qa_asr: Mutex::new(None),
-                qa_recorder: Mutex::new(None),
-                qa_stream_cancelled: Arc::new(AtomicBool::new(false)),
                 local_asr_cache: Arc::new(crate::asr::local::LocalAsrCache::new()),
                 foundry_local_runtime,
                 sherpa_onnx_runtime,
@@ -428,8 +390,8 @@ impl Coordinator {
         *self.inner.app.lock() = Some(handle);
     }
 
-    /// 让所有 hotkey supervisor loop（dictation / qa / combo / translation /
-    /// switch_style / open_app）在下一轮 sleep / poll 后退出。生产场景下进程退出
+    /// 让所有 hotkey supervisor loop（dictation / combo / switch_style / open_app）
+    /// 在下一轮 sleep / poll 后退出。生产场景下进程退出
     /// 一并 reap 所有线程，但 integration test 和未来 RunEvent::Exit 钩子需要
     /// 显式退出路径。审计 3.1.2。
     #[allow(dead_code)]
@@ -451,33 +413,6 @@ impl Coordinator {
         self.inner.hotkey.lock().take();
     }
 
-    /// 启动 QA hotkey supervisor（issue #118）。和 `start_hotkey_listener` 平行：
-    /// 守护线程反复尝试注册（用户可能改了组合键），失败则 3s 后重试。
-    pub fn start_qa_hotkey_listener(&self) {
-        let inner = Arc::clone(&self.inner);
-        std::thread::Builder::new()
-            .name("openless-qa-hotkey-supervisor".into())
-            .spawn(move || qa_hotkey_supervisor_loop(inner))
-            .ok();
-    }
-
-    pub fn stop_qa_hotkey_listener(&self) {
-        // QaHotkeyMonitor::drop 在 macOS 底层是 Carbon RemoveEventHotKey，要求主线程。
-        // RunEvent::Exit 回调不保证在 AppKit 主线程跑，drop 漏到 tokio worker 上会
-        // 触发 macOS dispatch_assert_queue_fail SIGTRAP。包到 run_on_main_thread 让
-        // drop 在主线程发生；AppHandle 已 None 时直接 drop（最坏 crash 也是退出时刻）。
-        // 详见 issue #169。
-        let app = self.inner.app.lock().clone();
-        if let Some(app) = app {
-            let inner = Arc::clone(&self.inner);
-            let _ = app.run_on_main_thread(move || {
-                inner.qa_hotkey.lock().take();
-            });
-        } else {
-            self.inner.qa_hotkey.lock().take();
-        }
-    }
-
     /// 启动自定义组合键监听器。当 `prefs.hotkey.trigger == Custom` 时，
     /// 代替 modifier-only 的 hotkey monitor。
     pub fn start_combo_hotkey_listener(&self) {
@@ -490,18 +425,6 @@ impl Coordinator {
 
     pub fn stop_combo_hotkey_listener(&self) {
         take_combo_hotkey_on_main_thread(&self.inner);
-    }
-
-    pub fn start_translation_hotkey_listener(&self) {
-        let inner = Arc::clone(&self.inner);
-        std::thread::Builder::new()
-            .name("openless-translation-hotkey-supervisor".into())
-            .spawn(move || translation_hotkey_supervisor_loop(inner))
-            .ok();
-    }
-
-    pub fn stop_translation_hotkey_listener(&self) {
-        take_translation_hotkey_on_main_thread(&self.inner);
     }
 
     pub fn start_switch_style_hotkey_listener(&self) {
@@ -580,113 +503,6 @@ impl Coordinator {
         });
     }
 
-    /// 用户在设置里改了 QA 组合键时调用。先持久化（由 prefs.set 完成），
-    /// 然后通知活着的 monitor 重新注册；monitor 不存在时 supervisor 会自然
-    /// 在下一次循环里读到新的 prefs。
-    pub fn update_qa_hotkey_binding(&self) {
-        let prefs = self.inner.prefs.get();
-        let Some(binding) = prefs.qa_hotkey.clone() else {
-            // 用户把功能关了 → 直接 drop monitor。drop 也得在主线程，否则 Carbon
-            // unregister 会失败/UB。
-            let app = self.inner.app.lock().clone();
-            if let Some(app) = app {
-                let inner_clone = Arc::clone(&self.inner);
-                let _ = app.run_on_main_thread(move || {
-                    inner_clone.qa_hotkey.lock().take();
-                });
-            } else {
-                self.inner.qa_hotkey.lock().take();
-            }
-            log::info!("[coord] QA hotkey 已关闭");
-            self.update_modifier_shortcut_bindings();
-            return;
-        };
-        if crate::shortcut_binding::legacy_modifier_trigger(&binding).is_some() {
-            let app = self.inner.app.lock().clone();
-            if let Some(app) = app {
-                let inner_clone = Arc::clone(&self.inner);
-                let _ = app.run_on_main_thread(move || {
-                    inner_clone.qa_hotkey.lock().take();
-                });
-            } else {
-                self.inner.qa_hotkey.lock().take();
-            }
-            self.update_modifier_shortcut_bindings();
-            log::info!("[coord] QA hotkey uses modifier-only listener");
-            return;
-        }
-        self.update_modifier_shortcut_bindings();
-        // global-hotkey crate 的 manager.register/unregister 必须主线程跑。
-        // 没在主线程会让 Carbon 句柄注册看似成功但事件不派发。
-        let app = self.inner.app.lock().clone();
-        let Some(app) = app else {
-            log::warn!("[coord] update QA hotkey binding: AppHandle 未 bind，跳过");
-            return;
-        };
-        let inner_clone = Arc::clone(&self.inner);
-        let binding_for_main = binding.clone();
-        let _ = app.run_on_main_thread(move || {
-            // 路径 1：当前已有 monitor → 在主线程换绑定。
-            if let Some(monitor) = inner_clone.qa_hotkey.lock().as_ref() {
-                if let Err(e) = monitor.update_binding(binding_for_main.clone()) {
-                    log::warn!("[coord] update QA hotkey binding 失败: {e}");
-                }
-                return;
-            }
-            // 路径 2：之前还没装上 → 主线程上重装一次（supervisor 也会重试，
-            // 但用户体感更快：set_qa_hotkey 命令一返回，hotkey 立即生效）。
-            let (tx, rx) = mpsc::channel::<QaHotkeyEvent>();
-            match QaHotkeyMonitor::start(binding_for_main, tx) {
-                Ok(monitor) => {
-                    *inner_clone.qa_hotkey.lock() = Some(monitor);
-                    log::info!("[coord] QA hotkey listener installed on main thread (via update)");
-                    let bridge_inner = Arc::clone(&inner_clone);
-                    std::thread::Builder::new()
-                        .name("openless-qa-hotkey-bridge".into())
-                        .spawn(move || qa_hotkey_bridge_loop(bridge_inner, rx))
-                        .ok();
-                }
-                Err(e) => {
-                    log::warn!("[coord] update QA hotkey binding 失败: {e}");
-                }
-            }
-        });
-    }
-
-    pub fn update_translation_hotkey_binding(&self) {
-        if let Err(e) = self.try_update_translation_hotkey_binding() {
-            log::warn!("[coord] update translation hotkey binding 失败: {e}");
-        }
-    }
-
-    pub fn try_update_translation_hotkey_binding(&self) -> Result<(), String> {
-        let prefs = self.inner.prefs.get();
-        if is_builtin_translation_shift(&prefs.translation_hotkey)
-            || crate::shortcut_binding::legacy_modifier_trigger(&prefs.translation_hotkey).is_some()
-        {
-            take_translation_hotkey_on_main_thread(&self.inner);
-            self.update_modifier_shortcut_bindings();
-            log::info!("[coord] translation hotkey uses modifier-only listener");
-            return Ok(());
-        }
-        self.update_modifier_shortcut_bindings();
-        let app = self.inner.app.lock().clone();
-        let Some(app) = app else {
-            return Err("AppHandle 未 bind，无法注册翻译快捷键".into());
-        };
-        let inner_clone = Arc::clone(&self.inner);
-        let binding_for_main = prefs.translation_hotkey.clone();
-        let (result_tx, result_rx) = mpsc::sync_channel::<Result<(), String>>(1);
-        let _ = app.run_on_main_thread(move || {
-            let result = update_translation_hotkey_on_main_thread(inner_clone, binding_for_main);
-            let _ = result_tx.send(result.map_err(|e| e.to_string()));
-        });
-        match result_rx.recv_timeout(std::time::Duration::from_secs(5)) {
-            Ok(result) => result,
-            Err(_) => Err("注册翻译快捷键超时".into()),
-        }
-    }
-
     pub fn update_switch_style_hotkey_binding(&self) {
         self.update_action_hotkey_binding(ActionHotkeyKind::SwitchStyle);
     }
@@ -731,30 +547,6 @@ impl Coordinator {
         });
     }
 
-    /// 给前端 Settings 渲染当前 QA 快捷键 label（如 "Cmd+Shift+;"）。
-    /// `qa_hotkey == None` 时返回空串，UI 据此显示「未启用」。
-    pub fn qa_hotkey_label(&self) -> String {
-        self.inner
-            .prefs
-            .get()
-            .qa_hotkey
-            .as_ref()
-            .map(|b| b.display_label())
-            .unwrap_or_default()
-    }
-
-    /// 用户点 ✕ / 按 Esc 关 QA 浮窗时调。等价于：取消任何进行中的录音 +
-    /// 清空多轮对话历史 + 隐藏窗口。详见 issue #118 v2。
-    pub fn qa_window_dismiss(&self) {
-        close_qa_panel(&self.inner);
-    }
-
-    /// 用户点 📌 切换 pinned 状态。pinned=true 时浮窗不自动隐藏。
-    pub fn qa_window_pin(&self, pinned: bool) {
-        self.inner.qa_state.lock().pinned = pinned;
-        log::info!("[coord] QA window pinned={pinned}");
-    }
-
     pub fn history(&self) -> &HistoryStore {
         &self.inner.history
     }
@@ -786,7 +578,6 @@ impl Coordinator {
             self.update_combo_hotkey_binding();
         }
         self.ensure_modifier_hotkey_monitor(binding);
-        self.update_modifier_shortcut_bindings();
     }
 
     fn ensure_modifier_hotkey_monitor(&self, binding: crate::types::HotkeyBinding) {
@@ -824,10 +615,10 @@ impl Coordinator {
                 #[cfg(target_os = "linux")]
                 {
                     crate::linux_fcitx::start_dictation_signal_listener(fcitx_tx);
-                    if fcitx_binding.trigger == crate::types::HotkeyTrigger::Custom {
-                        sync_custom_dictation_to_plugin(&self.inner);
-                    } else {
-                        crate::linux_fcitx::sync_binding_to_plugin(&fcitx_binding);
+                if fcitx_binding.trigger == crate::types::HotkeyTrigger::Custom {
+                    sync_custom_dictation_to_plugin(&self.inner);
+                } else {
+                    crate::linux_fcitx::sync_binding_to_plugin(&fcitx_binding);
                     }
                 }
             }
@@ -839,13 +630,6 @@ impl Coordinator {
                     last_error: Some(e),
                 };
             }
-        }
-    }
-
-    pub fn update_modifier_shortcut_bindings(&self) {
-        if let Some(monitor) = self.inner.hotkey.lock().as_ref() {
-            let (qa_trigger, translation_trigger) = modifier_shortcut_triggers(&self.inner);
-            monitor.update_modifier_shortcuts(qa_trigger, translation_trigger);
         }
     }
 
@@ -878,13 +662,6 @@ impl Coordinator {
     /// Listening → stop。可用于桌面快捷键 → CLI 转发的备用触发路径。
     pub fn dictation_phase_for_cli(&self) -> SessionPhase {
         self.inner.state.lock().phase
-    }
-
-    /// CLI 入口的 QA toggle：直接复用 modifier-only QA 热键边沿的处理函数。
-    /// 与 `handle_qa_hotkey_pressed` 同语义 — Idle → 开浮窗 / Recording → 收尾 /
-    /// Processing → 忽略。桌面快捷键 → CLI 转发的备用进入点。
-    pub async fn cli_toggle_qa_panel(&self) {
-        handle_qa_hotkey_pressed(&self.inner).await;
     }
 
     pub fn set_shortcut_recording_active(&self, active: bool) {
@@ -1080,10 +857,6 @@ fn hotkey_supervisor_loop(inner: Arc<Inner>) {
             Ok(monitor) => {
                 let adapter = monitor.kind();
                 *inner.hotkey.lock() = Some(monitor);
-                if let Some(monitor) = inner.hotkey.lock().as_ref() {
-                    let (qa_trigger, translation_trigger) = modifier_shortcut_triggers(&inner);
-                    monitor.update_modifier_shortcuts(qa_trigger, translation_trigger);
-                }
                 *inner.hotkey_status.lock() = HotkeyStatus {
                     adapter,
                     state: HotkeyStatusState::Installed,
@@ -1127,116 +900,6 @@ fn hotkey_supervisor_loop(inner: Arc<Inner>) {
                     );
                 }
                 std::thread::sleep(std::time::Duration::from_secs(3));
-            }
-        }
-    }
-}
-
-// ─────────────────────────── QA hotkey supervisor ───────────────────────────
-
-fn qa_hotkey_supervisor_loop(inner: Arc<Inner>) {
-    let mut attempts: u32 = 0;
-    loop {
-        if inner.shutdown.load(Ordering::SeqCst) {
-            return;
-        }
-        // 用户已经把 QA 关掉就睡着等 prefs 改动；改动通过 update_qa_hotkey_binding 唤醒。
-        let binding = match inner.prefs.get().qa_hotkey.clone() {
-            Some(b) => b,
-            None => {
-                inner.qa_hotkey.lock().take();
-                std::thread::sleep(std::time::Duration::from_secs(5));
-                continue;
-            }
-        };
-        if crate::shortcut_binding::legacy_modifier_trigger(&binding).is_some() {
-            inner.qa_hotkey.lock().take();
-            if let Some(monitor) = inner.hotkey.lock().as_ref() {
-                let (qa_trigger, translation_trigger) = modifier_shortcut_triggers(&inner);
-                monitor.update_modifier_shortcuts(qa_trigger, translation_trigger);
-            }
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            continue;
-        }
-
-        if inner.qa_hotkey.lock().is_some() {
-            // 已注册成功 → 不重复装；睡 5s 复查（ binding 变化由 update 路径手动触发 ）。
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            continue;
-        }
-
-        // global-hotkey crate 在 macOS 走 Carbon RegisterEventHotKey，要求 manager
-        // 在主线程构造，否则 register() 看起来 Ok 但事件根本不会派发——这是 issue #118
-        // PR #119 第一版漏掉的关键步骤，导致用户按了 hotkey 完全无反应。这里通过
-        // run_on_main_thread 把 QaHotkeyMonitor::start 跳到主线程跑，结果再回 channel。
-        let app = inner.app.lock().clone();
-        let app = match app {
-            Some(a) => a,
-            None => {
-                // 启动期 AppHandle 还没 bind，再等。
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                continue;
-            }
-        };
-
-        let (tx, rx) = mpsc::channel::<QaHotkeyEvent>();
-        let (init_tx, init_rx) = mpsc::sync_channel::<Result<QaHotkeyMonitor, QaHotkeyError>>(1);
-        let binding_for_main = binding.clone();
-        let _ = app.run_on_main_thread(move || {
-            let result = QaHotkeyMonitor::start(binding_for_main, tx);
-            let _ = init_tx.send(result);
-        });
-
-        // run_on_main_thread 是 fire-and-forget；等主线程跑完结果回来。给 5s 上限避免
-        // 主线程繁忙时 supervisor 永久阻塞。
-        let init_result = match init_rx.recv_timeout(std::time::Duration::from_secs(5)) {
-            Ok(r) => r,
-            Err(_) => {
-                attempts += 1;
-                if attempts <= 3 || attempts % 10 == 0 {
-                    log::warn!(
-                        "[coord] QA hotkey 第 {attempts} 次注册超时（主线程未回执）；3s 后重试"
-                    );
-                }
-                std::thread::sleep(std::time::Duration::from_secs(3));
-                continue;
-            }
-        };
-
-        match init_result {
-            Ok(monitor) => {
-                *inner.qa_hotkey.lock() = Some(monitor);
-                log::info!(
-                    "[coord] QA hotkey listener installed on main thread (after {} attempt(s))",
-                    attempts + 1
-                );
-                let inner_clone = Arc::clone(&inner);
-                std::thread::Builder::new()
-                    .name("openless-qa-hotkey-bridge".into())
-                    .spawn(move || qa_hotkey_bridge_loop(inner_clone, rx))
-                    .ok();
-                attempts = 0;
-            }
-            Err(e) => {
-                attempts += 1;
-                if attempts <= 3 || attempts % 10 == 0 {
-                    log::warn!("[coord] QA hotkey 第 {attempts} 次注册失败: {e}; 3s 后重试");
-                }
-                std::thread::sleep(std::time::Duration::from_secs(3));
-            }
-        }
-    }
-}
-
-fn qa_hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<QaHotkeyEvent>) {
-    while let Ok(evt) = rx.recv() {
-        if inner.shortcut_recording_active.load(Ordering::SeqCst) {
-            continue;
-        }
-        let inner_cloned = Arc::clone(&inner);
-        match evt {
-            QaHotkeyEvent::Pressed => {
-                async_runtime::spawn(async move { handle_qa_hotkey_pressed(&inner_cloned).await });
             }
         }
     }
@@ -1347,108 +1010,6 @@ fn combo_hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<ComboHotkeyEve
                     handle_released_edge(&inner_cloned).await;
                 });
             }
-        }
-    }
-}
-
-fn translation_hotkey_supervisor_loop(inner: Arc<Inner>) {
-    let mut attempts: u32 = 0;
-    loop {
-        if inner.shutdown.load(Ordering::SeqCst) {
-            return;
-        }
-        let binding = inner.prefs.get().translation_hotkey;
-        if is_builtin_translation_shift(&binding)
-            || crate::shortcut_binding::legacy_modifier_trigger(&binding).is_some()
-        {
-            take_translation_hotkey_on_main_thread(&inner);
-            if let Some(monitor) = inner.hotkey.lock().as_ref() {
-                let (qa_trigger, translation_trigger) = modifier_shortcut_triggers(&inner);
-                monitor.update_modifier_shortcuts(qa_trigger, translation_trigger);
-            }
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            continue;
-        }
-
-        if inner.translation_hotkey.lock().is_some() {
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            continue;
-        }
-
-        let app = match inner.app.lock().clone() {
-            Some(a) => a,
-            None => {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                continue;
-            }
-        };
-
-        let (tx, rx) = mpsc::channel::<ComboHotkeyEvent>();
-        let (init_tx, init_rx) =
-            mpsc::sync_channel::<Result<ComboHotkeyMonitor, ComboHotkeyError>>(1);
-        let binding_for_main = binding.clone();
-        let _ = app.run_on_main_thread(move || {
-            let result = ComboHotkeyMonitor::start(binding_for_main, tx);
-            let _ = init_tx.send(result);
-        });
-
-        let init_result = match init_rx.recv_timeout(std::time::Duration::from_secs(5)) {
-            Ok(r) => r,
-            Err(_) => {
-                attempts += 1;
-                std::thread::sleep(std::time::Duration::from_secs(3));
-                continue;
-            }
-        };
-
-        match init_result {
-            Ok(monitor) => {
-                *inner.translation_hotkey.lock() = Some(monitor);
-                let inner_clone = Arc::clone(&inner);
-                std::thread::Builder::new()
-                    .name("openless-translation-hotkey-bridge".into())
-                    .spawn(move || translation_hotkey_bridge_loop(inner_clone, rx))
-                    .ok();
-                attempts = 0;
-            }
-            Err(e) => {
-                attempts += 1;
-                if attempts <= 3 || attempts % 10 == 0 {
-                    log::warn!(
-                        "[coord] translation hotkey 第 {attempts} 次注册失败: {e}; 3s 后重试"
-                    );
-                }
-                std::thread::sleep(std::time::Duration::from_secs(3));
-            }
-        }
-    }
-}
-
-fn update_translation_hotkey_on_main_thread(
-    inner: Arc<Inner>,
-    binding: crate::types::ShortcutBinding,
-) -> Result<(), ComboHotkeyError> {
-    if let Some(monitor) = inner.translation_hotkey.lock().as_ref() {
-        return monitor.update_binding(binding);
-    }
-    let (tx, rx) = mpsc::channel::<ComboHotkeyEvent>();
-    let monitor = ComboHotkeyMonitor::start(binding, tx)?;
-    *inner.translation_hotkey.lock() = Some(monitor);
-    let bridge_inner = Arc::clone(&inner);
-    std::thread::Builder::new()
-        .name("openless-translation-hotkey-bridge".into())
-        .spawn(move || translation_hotkey_bridge_loop(bridge_inner, rx))
-        .map_err(|e| ComboHotkeyError::RegisterFailed(format!("spawn bridge thread: {e}")))?;
-    Ok(())
-}
-
-fn translation_hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<ComboHotkeyEvent>) {
-    while let Ok(evt) = rx.recv() {
-        if inner.shortcut_recording_active.load(Ordering::SeqCst) {
-            continue;
-        }
-        if matches!(evt, ComboHotkeyEvent::Pressed) {
-            mark_translation_modifier_seen(&inner);
         }
     }
 }
@@ -1616,18 +1177,6 @@ fn take_combo_hotkey_on_main_thread(inner: &Arc<Inner>) {
     }
 }
 
-fn take_translation_hotkey_on_main_thread(inner: &Arc<Inner>) {
-    let app = inner.app.lock().clone();
-    if let Some(app) = app {
-        let inner = Arc::clone(inner);
-        let _ = app.run_on_main_thread(move || {
-            inner.translation_hotkey.lock().take();
-        });
-    } else {
-        inner.translation_hotkey.lock().take();
-    }
-}
-
 fn take_action_hotkey_on_main_thread(inner: &Arc<Inner>, kind: ActionHotkeyKind) {
     let app = inner.app.lock().clone();
     if let Some(app) = app {
@@ -1678,10 +1227,6 @@ fn action_hotkey_bridge_thread_name(kind: ActionHotkeyKind) -> &'static str {
     }
 }
 
-fn is_builtin_translation_shift(binding: &crate::types::ShortcutBinding) -> bool {
-    binding.modifiers.is_empty() && binding.primary.eq_ignore_ascii_case("shift")
-}
-
 /// Linux: 从 prefs 读取自定义组合键，同步到 fcitx5 插件。
 #[cfg(target_os = "linux")]
 fn sync_custom_dictation_to_plugin(inner: &Arc<Inner>) {
@@ -1694,35 +1239,6 @@ fn sync_custom_dictation_to_plugin(inner: &Arc<Inner>) {
     match crate::linux_fcitx::set_custom_dictation_trigger(&key_string) {
         Ok(()) => log::info!("[fcitx] Synced custom dictation trigger '{}' to plugin", key_string),
         Err(e) => log::warn!("[fcitx] Failed to sync custom dictation trigger: {e}"),
-    }
-}
-
-fn modifier_shortcut_triggers(
-    inner: &Arc<Inner>,
-) -> (
-    Option<crate::types::HotkeyTrigger>,
-    Option<crate::types::HotkeyTrigger>,
-) {
-    let prefs = inner.prefs.get();
-    let qa_trigger = prefs
-        .qa_hotkey
-        .as_ref()
-        .and_then(crate::shortcut_binding::legacy_modifier_trigger);
-    let translation_trigger = if is_builtin_translation_shift(&prefs.translation_hotkey) {
-        None
-    } else {
-        crate::shortcut_binding::legacy_modifier_trigger(&prefs.translation_hotkey)
-    };
-    (qa_trigger, translation_trigger)
-}
-
-fn mark_translation_modifier_seen(inner: &Arc<Inner>) {
-    let phase = inner.state.lock().phase;
-    if matches!(phase, SessionPhase::Starting | SessionPhase::Listening) {
-        inner
-            .translation_modifier_seen
-            .store(true, Ordering::SeqCst);
-        log::info!("[coord] translation modifier seen during {phase:?}");
     }
 }
 
@@ -1756,18 +1272,6 @@ fn hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<HotkeyEvent>) {
             HotkeyEvent::Cancelled => {
                 cancel_session(&inner_cloned);
             }
-            HotkeyEvent::TranslationModifierPressed => {
-                let translation_hotkey = inner_cloned.prefs.get().translation_hotkey;
-                if is_builtin_translation_shift(&translation_hotkey)
-                    || crate::shortcut_binding::legacy_modifier_trigger(&translation_hotkey)
-                        .is_some()
-                {
-                    mark_translation_modifier_seen(&inner_cloned);
-                }
-            }
-            HotkeyEvent::QaShortcutPressed => {
-                async_runtime::spawn(async move { handle_qa_hotkey_pressed(&inner_cloned).await });
-            }
         }
     }
 }
@@ -1778,24 +1282,6 @@ fn reset_shortcut_held_state(inner: &Arc<Inner>) {
         monitor.reset_held_state();
     }
     let prefs = inner.prefs.get();
-    if let Some(binding) = prefs.qa_hotkey.as_ref() {
-        if crate::shortcut_binding::legacy_modifier_trigger(binding).is_none() {
-            if let Some(monitor) = inner.qa_hotkey.lock().as_ref() {
-                if let Err(e) = monitor.update_binding(binding.clone()) {
-                    log::warn!("[coord] reset QA hotkey latch failed: {e}");
-                }
-            }
-        }
-    }
-    if !is_builtin_translation_shift(&prefs.translation_hotkey)
-        && crate::shortcut_binding::legacy_modifier_trigger(&prefs.translation_hotkey).is_none()
-    {
-        if let Some(monitor) = inner.translation_hotkey.lock().as_ref() {
-            if let Err(e) = monitor.update_binding(prefs.translation_hotkey.clone()) {
-                log::warn!("[coord] reset translation hotkey latch failed: {e}");
-            }
-        }
-    }
     if !is_modifier_only_shortcut(&prefs.switch_style_hotkey) {
         if let Some(monitor) = inner.switch_style_hotkey.lock().as_ref() {
             if let Err(e) = monitor.update_binding(prefs.switch_style_hotkey.clone()) {
@@ -1823,18 +1309,7 @@ async fn handle_window_hotkey_event(
         return Ok(());
     }
     if event_type == "keydown" && key == "Escape" {
-        // Esc 路由（issue #161）：QA 浮窗可见时优先取消 QA（不动 dictation）；
-        // 否则走 dictation 取消通路。之前无条件 cancel_session 导致 QA 浮窗
-        // 按 Esc 杀的是 dictation 而 QA 流还在烧 token。
-        let qa_active = {
-            let st = inner.qa_state.lock();
-            st.panel_visible || st.phase != QaPhase::Idle
-        };
-        if qa_active {
-            close_qa_panel(inner);
-        } else {
-            cancel_session(inner);
-        }
+        cancel_session(inner);
         return Ok(());
     }
 
@@ -1907,33 +1382,6 @@ fn window_key_matches_trigger(trigger: crate::types::HotkeyTrigger, key: &str, c
 }
 
 // ─────────────────────────── session lifecycle ───────────────────────────
-
-/// QA 录音 runtime error 监听器。镜像 `spawn_recorder_error_monitor` 的语义但走 QA
-/// 收尾路径（`finish_qa_with_error` 替代 `abort_recording_with_error`）。
-/// 用 qa_state.session_id 守卫 stale 事件。详见 issue #168。
-fn spawn_qa_recorder_error_monitor(inner: &Arc<Inner>, rx: mpsc::Receiver<RecorderError>) {
-    let captured_session_id = inner.qa_state.lock().session_id;
-    let inner = Arc::clone(inner);
-    std::thread::Builder::new()
-        .name("openless-qa-recorder-error-monitor".into())
-        .spawn(move || {
-            if let Ok(err) = rx.recv() {
-                let current_session_id = inner.qa_state.lock().session_id;
-                if captured_session_id != current_session_id {
-                    log::warn!(
-                        "[coord] QA recorder error from stale session {} dropped (current={}, err={})",
-                        captured_session_id,
-                        current_session_id,
-                        err
-                    );
-                    return;
-                }
-                log::error!("[coord] QA recorder runtime error: {err}");
-                finish_qa_with_error(&inner, format!("录音设备异常: {err}"));
-            }
-        })
-        .ok();
-}
 
 #[cfg(target_os = "windows")]
 fn store_prepared_windows_ime_session(
@@ -2434,18 +1882,6 @@ fn apply_chinese_script_preference(text: &str, pref: ChineseScriptPreference) ->
     }
 }
 
-/// QA 路径专用：begin_qa_session 永远走 Volcengine 流式（低延迟要求），所以
-/// 凭据校验也只看 Volcengine 字段，不依赖 active_asr。dictation 路径请用
-/// `ensure_asr_credentials`。
-fn ensure_qa_volcengine_credentials() -> Result<(), String> {
-    let creds = read_volc_credentials();
-    if creds.app_id.trim().is_empty() || creds.access_token.trim().is_empty() {
-        Err("请先在设置中填写火山引擎 ASR App Key 和 Access Key".to_string())
-    } else {
-        Ok(())
-    }
-}
-
 /// 润色文本；失败时返回原文 + 失败原因，调用方据此弹错误胶囊 + 写历史 error_code。
 /// 之前固定返回 String，调用方拿不到失败信号 → 用户感知"为什么风格设置没生效"。issue #57。
 /// 流式润色的三态结果。让上层（dictation pipeline）能区分「已经流出去了」、
@@ -2639,77 +2075,6 @@ async fn polish_text(
         .await?)
 }
 
-/// 翻译路径——和 polish 一样失败时返回原文 + 失败原因，避免"不丢字"约定被违反（CLAUDE.md）。
-async fn translate_or_passthrough(
-    raw: &RawTranscript,
-    target_language: &str,
-    working_languages: &[String],
-    chinese_script_preference: ChineseScriptPreference,
-    output_language_preference: OutputLanguagePreference,
-    llm_thinking_enabled: bool,
-    front_app: Option<&str>,
-) -> (String, Option<String>) {
-    match translate_text(
-        &raw.text,
-        target_language,
-        working_languages,
-        chinese_script_preference,
-        output_language_preference,
-        llm_thinking_enabled,
-        front_app,
-    )
-    .await
-    {
-        Ok(s) => (s, None),
-        Err(e) => {
-            let reason = e.to_string();
-            log::error!("[coord] translate failed, falling back to raw: {reason}");
-            (raw.text.clone(), Some(reason))
-        }
-    }
-}
-
-async fn translate_text(
-    raw: &str,
-    target_language: &str,
-    working_languages: &[String],
-    chinese_script_preference: ChineseScriptPreference,
-    output_language_preference: OutputLanguagePreference,
-    llm_thinking_enabled: bool,
-    front_app: Option<&str>,
-) -> anyhow::Result<String> {
-    // 见 polish_text 顶部注释——同样的 Gemini / OpenAI-compatible 路由逻辑。
-    let active_llm = CredentialsVault::get_active_llm();
-    if active_llm == "gemini" {
-        let (api_key, model, base_url) = read_gemini_credentials()?;
-        let provider = GeminiProvider::new(
-            GeminiConfig::new(api_key, model, base_url).with_thinking_enabled(llm_thinking_enabled),
-        );
-        return Ok(provider
-            .translate_to(
-                raw,
-                target_language,
-                working_languages,
-                chinese_script_preference,
-                output_language_preference,
-                front_app,
-            )
-            .await?);
-    }
-
-    let provider = build_active_llm_provider(llm_thinking_enabled)?;
-    Ok(provider
-        .translate_to(
-            raw,
-            target_language,
-            working_languages,
-            chinese_script_preference,
-            output_language_preference,
-            front_app,
-        )
-        .await?)
-}
-
 fn read_whisper_credentials() -> (String, String, String) {
     let api_key = CredentialsVault::get(CredentialAccount::AsrApiKey)
         .ok()
@@ -2788,564 +2153,6 @@ fn enabled_hotwords(inner: &Arc<Inner>) -> Vec<DictionaryHotword> {
         .collect()
 }
 
-// ─────────────────────────── QA session lifecycle ───────────────────────────
-
-/// 划词语音问答会话（issue #118）。
-///
-/// 与 dictation 完全分离：
-/// - 不进 SessionPhase（互不抢锁）
-/// - 不写 history.json（除非 prefs.qa_save_history=true 才旁路写一条 placeholder）
-/// - 用独立的 qa_recorder + qa_asr，复用现有 Volcengine ASR 通路
-async fn begin_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
-    {
-        let mut state = inner.qa_state.lock();
-        if !state.panel_visible {
-            // 防御：浮窗没开就被叫到这里说明路由错了，直接退出。
-            return Ok(());
-        }
-        if state.phase != QaPhase::Idle {
-            return Ok(());
-        }
-        state.phase = QaPhase::Recording;
-        state.cancelled = false;
-        state.session_id = new_session_id();
-        state.front_app = capture_frontmost_app();
-        state.selection = None;
-    }
-    // 重置 SSE 取消标志：上一轮可能 set 过的 true 留着会让本轮流式立即 break。
-    inner.qa_stream_cancelled.store(false, Ordering::SeqCst);
-
-    // 抓选区。每轮按 Option 都重新抓一次：用户多轮提问中可以重新选别处文字。
-    //
-    // - macOS：浮窗走 orderFrontRegardless，不成为 key window，原 app 仍是 frontmost，
-    //   AX/Cmd+C fallback 都能拿到。
-    // - Windows：#466 修复后 show_qa_window_no_activate 主动抓焦点，QA 此刻已是前台，
-    //   simulate_copy 会跑在 QA 自己 webview 上 → 抓不到。focus-dance 上半场：把焦点临时
-    //   还给"用户原 app 的 HWND"。
-    //
-    //   多轮场景的目标刷新：用户开 QA 后可能 Alt+Tab 切到别的 app 选新文字。如果还死认
-    //   open_qa_panel 时记下的初始 HWND，会把焦点抢回错的 app（pr_agent stale-focus 关注点）。
-    //   策略：每轮先看当前前台是不是本进程的窗口（QA / capsule / main）—— 是 → 用户没切
-    //   走，沿用 saved；不是 → 用户切到了真正的外部 app，刷新 saved 为当前 HWND。
-    //   抓完选区后下半场再把焦点交还 QA，让 ESC/X 继续可用。
-    #[cfg(target_os = "windows")]
-    {
-        // 合并两次 lock：原来分 lock #1 写 + lock #2 读，两者之间 close_qa_panel 在别的
-        // 线程把 qa_focus_target 清成 None 会被覆盖回旧 HWND。Cloud 评审指出的 TOCTOU。
-        // 单次加锁里既写最新外部前台、再读出来交给后面的 restore_focus_target_if_possible
-        // —— capture_external_focus_target() 内部只调 GetForegroundWindow / pid 查询，
-        // 不会反向取 qa_state 锁，持锁期间调用安全。
-        let saved_target = {
-            let mut state = inner.qa_state.lock();
-            if let Some(current_external) = capture_external_focus_target() {
-                state.qa_focus_target = Some(current_external);
-            }
-            state.qa_focus_target
-        };
-        let _ = restore_focus_target_if_possible(saved_target);
-    }
-    let selection = capture_selection();
-    #[cfg(target_os = "windows")]
-    if let Some(app) = inner.app.lock().clone() {
-        crate::refocus_qa_window(&app);
-    }
-    let selection_preview_text = selection.as_ref().map(|s| s.text.clone());
-    inner.qa_state.lock().selection = selection.clone();
-
-    if let Some(app) = inner.app.lock().clone() {
-        let messages = inner.qa_state.lock().messages.clone();
-        let _ = app.emit_to(
-            "qa",
-            "qa:state",
-            serde_json::json!({
-                "kind": "recording",
-                "selection_preview": selection_preview_text,
-                "messages": messages,
-            }),
-        );
-    }
-
-    // 2. 凭据缺失走静默 fallback：与 dictation 一致的"用户的话不丢"约定。
-    //    缺火山凭据 → 后续 Recorder 仍会跑，只是 ASR 拿不到结果，end_qa_session
-    //    会发 idle 事件关浮窗。
-    //    注意：QA 强制走 Volcengine 流式（见下方注释），所以这里必须直接校验
-    //    Volcengine 字段，不能复用 `ensure_asr_credentials`——后者会按用户在设置
-    //    里选的 active_asr 走 OpenAI 兼容分支，让 QA 把 `asr.api_key` 当成必要项，
-    //    或在 Volcengine 凭据其实为空时误判通过。Codex P1，PR #213。
-    if let Err(message) = ensure_qa_volcengine_credentials() {
-        log::warn!("[coord] QA: ASR credentials missing: {message}");
-        finish_qa_with_error(inner, format!("缺少 ASR 凭据：{message}"));
-        return Err(message);
-    }
-
-    if let Err(message) = ensure_microphone_permission(inner) {
-        log::warn!("[coord] QA: microphone permission gate failed: {message}");
-        finish_qa_with_error(inner, message.clone());
-        return Err(message);
-    }
-
-    // 3. 启动 Recorder + ASR（强制走 Volcengine 流式：QA 必须低延迟）。
-    let hotwords = enabled_hotwords(inner);
-    let creds = read_volc_credentials();
-    let asr = Arc::new(VolcengineStreamingASR::new(creds, hotwords));
-    let bridge = Arc::new(DeferredAsrBridge::new());
-    let consumer: Arc<dyn crate::recorder::AudioConsumer> = bridge.clone();
-    *inner.qa_asr.lock() = Some(Arc::clone(&asr));
-
-    // QA recorder 不需要 RMS 节流到胶囊；前端 QA 浮窗有自己的电平视图，
-    // 这里发一份事件给 "qa" label 用就够了。
-    let inner_for_level = Arc::clone(inner);
-    let last_emit_at = Arc::new(Mutex::new(None::<Instant>));
-    const LEVEL_EMIT_MIN_INTERVAL_MS: u64 = 33;
-    let level_handler: Arc<dyn Fn(f32) + Send + Sync> = Arc::new(move |level| {
-        let phase = inner_for_level.qa_state.lock().phase;
-        if phase != QaPhase::Recording {
-            return;
-        }
-        let now = Instant::now();
-        {
-            let mut last = last_emit_at.lock();
-            if let Some(prev) = *last {
-                if now.duration_since(prev).as_millis() < LEVEL_EMIT_MIN_INTERVAL_MS as u128 {
-                    return;
-                }
-            }
-            *last = Some(now);
-        }
-        if let Some(app) = inner_for_level.app.lock().clone() {
-            let _ = app.emit_to("qa", "qa:level", serde_json::json!({ "level": level }));
-        }
-        // 同步把电平推给底部胶囊，让 QA 录音也有跟主听写一致的可视反馈。
-        emit_capsule(
-            &inner_for_level,
-            CapsuleState::Recording,
-            level,
-            0,
-            None,
-            None,
-        );
-    });
-
-    let microphone_device_name = selected_microphone_device_name(inner);
-    stop_microphone_preview_monitor(inner, "QA recorder");
-    acquire_recording_mute(inner, "qa").await;
-    // QA 默认不留痕（qa_save_history 默认 false），录音文件归档也跟着不开。
-    // 调试 QA 麦克风请用主听写路径。
-    match Recorder::start(microphone_device_name, consumer, level_handler, None) {
-        Ok((rec, runtime_errors, archive_active)) => {
-            // QA 路径不写 dictation 的 history，但仍把 archive 状态归零，避免 dictation
-            // 接力时读到上一个 QA session 的过期值。
-            inner
-                .audio_archive_active
-                .store(archive_active, std::sync::atomic::Ordering::Relaxed);
-            *inner.qa_recorder.lock() = Some(rec);
-            // QA 也跟主听写一样监听 cpal runtime error。设备中途消失 / panic 时
-            // 不能让 QA 永远卡在 Recording 没反馈。详见 issue #168。
-            spawn_qa_recorder_error_monitor(inner, runtime_errors);
-        }
-        Err(e) => {
-            log::error!("[coord] QA recorder start failed: {e}");
-            inner.qa_asr.lock().take();
-            release_recording_mute(inner, "qa");
-            finish_qa_with_error(inner, format!("录音启动失败: {e}"));
-            return Err(e.to_string());
-        }
-    }
-
-    if let Err(e) = asr.open_session().await {
-        log::error!("[coord] QA: open ASR session failed: {e}");
-        stop_qa_recorder(inner);
-        if let Some(asr) = inner.qa_asr.lock().take() {
-            asr.cancel();
-        }
-        finish_qa_with_error(inner, format!("ASR 连接失败: {e}"));
-        return Err(e.to_string());
-    }
-
-    // cancel race：在 await 期间用户可能 dismiss 了浮窗。
-    if inner.qa_state.lock().cancelled {
-        log::info!("[coord] QA cancel raced during open_session — aborting begin");
-        asr.cancel();
-        stop_qa_recorder(inner);
-        inner.qa_state.lock().phase = QaPhase::Idle;
-        return Ok(());
-    }
-
-    let target: Arc<dyn crate::asr::AudioConsumer> = asr;
-    let flushed = bridge.attach(target);
-    log::info!("[coord] QA ASR connected; flushed {flushed} deferred audio bytes");
-
-    // 显式弹胶囊到 Recording。level_handler 后续会持续推电平，胶囊里"录音中…"
-    // 的视觉反馈跟主听写完全一致。
-    emit_capsule(inner, CapsuleState::Recording, 0.0, 0, None, None);
-
-    Ok(())
-}
-
-async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
-    {
-        let mut state = inner.qa_state.lock();
-        if state.phase != QaPhase::Recording {
-            return Ok(());
-        }
-        state.phase = QaPhase::Processing;
-    }
-
-    // 胶囊进入 Transcribing：用户视觉上看到"识别中"。
-    emit_capsule(inner, CapsuleState::Transcribing, 0.0, 0, None, None);
-
-    if let Some(app) = inner.app.lock().clone() {
-        let _ = app.emit_to("qa", "qa:state", serde_json::json!({ "kind": "loading" }));
-    }
-
-    stop_qa_recorder(inner);
-
-    let asr = match inner.qa_asr.lock().take() {
-        Some(a) => a,
-        None => {
-            inner.qa_state.lock().phase = QaPhase::Idle;
-            return Ok(());
-        }
-    };
-
-    if let Err(e) = asr.send_last_frame().await {
-        log::error!("[coord] QA: send last frame failed: {e}");
-    }
-    // 添加全局超时保护：防止 await_final_result() 永远挂起
-    let timeout_duration = std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS);
-    let raw = match tokio::time::timeout(timeout_duration, asr.await_final_result()).await {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
-            log::error!("[coord] QA: await final failed: {e}");
-            finish_qa_with_error(inner, format!("识别失败: {e}"));
-            return Err(e.to_string());
-        }
-        Err(_) => {
-            // 全局超时：最后的防线
-            log::error!(
-                "[coord] QA: 全局超时 {} 秒 - 强制恢复",
-                COORDINATOR_GLOBAL_TIMEOUT_SECS
-            );
-            // 清理 ASR session，避免资源泄漏
-            asr.cancel();
-            finish_qa_with_error(inner, "识别超时".to_string());
-            return Err("global timeout".to_string());
-        }
-    };
-
-    // cancel race：用户在 transcribe 中按 Esc / dismiss → 静默退出。
-    if inner.qa_state.lock().cancelled {
-        log::info!("[coord] QA cancel detected after ASR — discarding transcript");
-        finish_qa_idle_silently(inner);
-        return Ok(());
-    }
-
-    let question = raw.text.trim().to_string();
-    if question.is_empty() {
-        // 静默录音：不调 LLM，不弹错误，直接关浮窗。
-        log::info!("[coord] QA: empty transcript → silent dismiss");
-        finish_qa_idle_silently(inner);
-        return Ok(());
-    }
-
-    // 拼这一轮的 user 消息：第一轮（messages 还空）把选区原文嵌进去；
-    // 之后的轮次只送提问，让 LLM 顺着上下文回答。详见 issue #118 v2。
-    let user_content = {
-        let st = inner.qa_state.lock();
-        let is_first_turn = st.messages.is_empty();
-        let sel_text = st
-            .selection
-            .as_ref()
-            .map(|s| s.text.clone())
-            .unwrap_or_default();
-        if is_first_turn && !sel_text.trim().is_empty() {
-            format!(
-                "# 选区原文\n{}\n\n# 我的问题\n{}",
-                sel_text.trim(),
-                question
-            )
-        } else {
-            question.clone()
-        }
-    };
-
-    inner
-        .qa_state
-        .lock()
-        .messages
-        .push(crate::types::QaChatMessage {
-            role: "user".to_string(),
-            content: user_content,
-        });
-
-    if let Some(app) = inner.app.lock().clone() {
-        let messages = inner.qa_state.lock().messages.clone();
-        let _ = app.emit_to(
-            "qa",
-            "qa:state",
-            serde_json::json!({
-                "kind": "thinking",
-                "messages": messages,
-            }),
-        );
-    }
-
-    // 胶囊：思考阶段（复用 dictation 的 Polishing 状态——视觉上是"润色中"，QA 借用一下）。
-    emit_capsule(inner, CapsuleState::Polishing, 0.0, 0, None, None);
-
-    let prefs = inner.prefs.get();
-    let working_languages = prefs.working_languages.clone();
-    let chinese_script_preference = prefs.chinese_script_preference;
-    let output_language_preference = prefs.output_language_preference;
-    let llm_thinking_enabled = prefs.llm_thinking_enabled;
-    let (messages_for_llm, front_app) = {
-        let st = inner.qa_state.lock();
-        (st.messages.clone(), st.front_app.clone())
-    };
-
-    // 流式回调：每个 SSE delta 立刻推一帧 qa:state{kind:"answer_delta"} 给前端，
-    // 浮窗里气泡边收边长。最终的 messages 由 answer 事件统一下发（保证一致性）。
-    //
-    // session_id 守卫（issue #161）：闭包捕获本会话 id；用户取消 → 关浮窗 → 开新浮窗
-    // 开新一轮时，旧的 in-flight LLM 流仍可能 emit chunk，必须在 emit 前比对当前
-    // qa_state.session_id == 捕获 id，否则跳过——避免旧会话的字漏进新气泡。
-    let captured_session_id = inner.qa_state.lock().session_id;
-    let inner_for_delta = Arc::clone(inner);
-    let on_delta = move |chunk: &str| {
-        let cur_id = inner_for_delta.qa_state.lock().session_id;
-        if cur_id != captured_session_id {
-            return; // 旧 session 漏来的 chunk，丢弃
-        }
-        if let Some(app) = inner_for_delta.app.lock().clone() {
-            let _ = app.emit_to(
-                "qa",
-                "qa:state",
-                serde_json::json!({
-                    "kind": "answer_delta",
-                    "chunk": chunk,
-                }),
-            );
-        }
-    };
-
-    // SSE 流取消旗标：cancel_qa_session / close_qa_panel 会 set true，
-    // polish 的 SSE loop 每帧检查 → break，释放 HTTP body。详见 issue #161。
-    let cancel_flag = Arc::clone(&inner.qa_stream_cancelled);
-    let should_cancel = move || cancel_flag.load(Ordering::Relaxed);
-
-    let answer = match answer_chat_dispatch(
-        &messages_for_llm,
-        &working_languages,
-        chinese_script_preference,
-        output_language_preference,
-        llm_thinking_enabled,
-        front_app.as_deref(),
-        on_delta,
-        should_cancel,
-    )
-    .await
-    {
-        Ok(s) => s,
-        Err(e) => {
-            log::error!("[coord] QA: LLM answer failed: {e}");
-            // 把刚 push 的 user 消息回滚，避免 retry 重复
-            inner.qa_state.lock().messages.pop();
-            finish_qa_with_error(inner, format!("回答失败: {e}"));
-            return Err(e.to_string());
-        }
-    };
-
-    if inner.qa_state.lock().cancelled {
-        log::info!("[coord] QA cancel detected before answer — discarding");
-        // 同样回滚未配对的 user 消息
-        inner.qa_state.lock().messages.pop();
-        finish_qa_idle_silently(inner);
-        return Ok(());
-    }
-
-    inner
-        .qa_state
-        .lock()
-        .messages
-        .push(crate::types::QaChatMessage {
-            role: "assistant".to_string(),
-            content: answer.clone(),
-        });
-
-    if let Some(app) = inner.app.lock().clone() {
-        let messages = inner.qa_state.lock().messages.clone();
-        let _ = app.emit_to(
-            "qa",
-            "qa:state",
-            serde_json::json!({
-                "kind": "answer",
-                "messages": messages,
-            }),
-        );
-    }
-
-    // 胶囊直接收掉。QA 不走 insertion，没"已粘贴 N 字"语义；浮窗里答案就是用户的反馈。
-    // （之前用 Done 状态会被 capsule UI 错误地渲染上一次 dictation 残留的 message/insertedChars。）
-    emit_capsule(inner, CapsuleState::Idle, 0.0, 0, None, None);
-
-    // 可选：写一条 history（QA 类型）。当前 DictationSession schema 不能直接表达
-    // "QuestionAnswer" 类型，因此简单做法：勾选 qa_save_history 时写一条
-    // mode=Raw、error_code=Some("qaSession") 的 placeholder，避免污染 schema 同时
-    // 让用户能在历史里翻到这次问答的字面值。详见 issue #118。
-    if prefs.qa_save_history {
-        let session = DictationSession {
-            id: Uuid::new_v4().to_string(),
-            created_at: Utc::now().to_rfc3339(),
-            raw_transcript: question.clone(),
-            final_text: answer.clone(),
-            mode: PolishMode::Raw,
-            app_bundle_id: None,
-            app_name: front_app.clone(),
-            insert_status: InsertStatus::CopiedFallback,
-            error_code: Some("qaSession".to_string()),
-            duration_ms: Some(raw.duration_ms),
-            dictionary_entry_count: None,
-            has_audio_recording: None,
-        };
-        let prefs_snapshot = inner.prefs.get();
-        if let Err(e) = inner.history.append_with_retention(
-            session,
-            prefs_snapshot.history_retention_days,
-            prefs_snapshot.history_max_entries,
-        ) {
-            log::error!("[coord] QA history append failed: {e}");
-        }
-    }
-
-    inner.qa_state.lock().phase = QaPhase::Idle;
-    Ok(())
-}
-
-/// 把出错状态送到前端浮窗 + 胶囊错误闪一下 + 复位 phase。
-/// 浮窗保持可见（v2：错误后用户可以再按 Option 重试）；messages 一并送过去
-/// 让前端继续渲染历史对话。
-fn finish_qa_with_error(inner: &Arc<Inner>, message: String) {
-    stop_qa_recorder(inner);
-    if let Some(app) = inner.app.lock().clone() {
-        let messages = inner.qa_state.lock().messages.clone();
-        let _ = app.emit_to(
-            "qa",
-            "qa:state",
-            serde_json::json!({
-                "kind": "error",
-                "error": message,
-                "messages": messages,
-            }),
-        );
-    }
-    emit_capsule(inner, CapsuleState::Error, 0.0, 0, Some(message), None);
-    schedule_capsule_idle(inner, 1500);
-    let mut state = inner.qa_state.lock();
-    state.phase = QaPhase::Idle;
-    state.cancelled = false;
-}
-
-/// 静默收尾：发 idle 事件给前端，phase 复位。**不关浮窗**（v2：浮窗只在用户
-/// Esc/X 或再按 QA hotkey 时才关）；多轮对话历史保留。胶囊也即刻收掉。
-fn finish_qa_idle_silently(inner: &Arc<Inner>) {
-    if let Some(app) = inner.app.lock().clone() {
-        let messages = inner.qa_state.lock().messages.clone();
-        let _ = app.emit_to(
-            "qa",
-            "qa:state",
-            serde_json::json!({
-                "kind": "idle",
-                "messages": messages,
-            }),
-        );
-    }
-    emit_capsule(inner, CapsuleState::Idle, 0.0, 0, None, None);
-    let mut state = inner.qa_state.lock();
-    state.phase = QaPhase::Idle;
-    state.cancelled = false;
-    state.selection = None;
-}
-
-fn cancel_qa_session(inner: &Arc<Inner>) {
-    let phase = inner.qa_state.lock().phase;
-    if phase == QaPhase::Idle {
-        return;
-    }
-    inner.qa_state.lock().cancelled = true;
-    // SSE 流取消旗标——polish::chat_completion_history_streaming 的 loop 每帧检查
-    // 这个 flag，true 时立即 break 不再 drain HTTP body，避免取消后 LLM 仍烧 token。
-    // 详见 issue #161。
-    inner.qa_stream_cancelled.store(true, Ordering::SeqCst);
-    stop_qa_recorder(inner);
-    if let Some(asr) = inner.qa_asr.lock().take() {
-        asr.cancel();
-    }
-    // Processing 阶段保持 phase 让 end_qa_session 自然走完 cancel 检查；
-    // 否则直接复位。
-    if phase != QaPhase::Processing {
-        inner.qa_state.lock().phase = QaPhase::Idle;
-    }
-    log::info!("[coord] QA session cancelled (was {phase:?})");
-}
-
-async fn answer_chat_dispatch<F, C>(
-    messages: &[crate::types::QaChatMessage],
-    working_languages: &[String],
-    chinese_script_preference: ChineseScriptPreference,
-    output_language_preference: OutputLanguagePreference,
-    llm_thinking_enabled: bool,
-    front_app: Option<&str>,
-    on_delta: F,
-    should_cancel: C,
-) -> anyhow::Result<String>
-where
-    F: Fn(&str) + Send + Sync,
-    C: Fn() -> bool + Send + Sync,
-{
-    // 见 polish_text 顶部注释——同样的 Gemini / OpenAI-compatible 路由逻辑，
-    // QA 流式回答走 Gemini 原生 :streamGenerateContent?alt=sse。
-    let active_llm = CredentialsVault::get_active_llm();
-    if active_llm == "gemini" {
-        let (api_key, model, base_url) = read_gemini_credentials()?;
-        let provider = GeminiProvider::new(
-            GeminiConfig::new(api_key, model, base_url).with_thinking_enabled(llm_thinking_enabled),
-        );
-        return Ok(provider
-            .answer_chat_streaming(
-                messages,
-                working_languages,
-                chinese_script_preference,
-                output_language_preference,
-                front_app,
-                on_delta,
-                should_cancel,
-            )
-            .await?);
-    }
-
-    let provider = build_active_llm_provider(llm_thinking_enabled)?;
-    Ok(provider
-        .answer_chat_streaming(
-            messages,
-            working_languages,
-            chinese_script_preference,
-            output_language_preference,
-            front_app,
-            on_delta,
-            should_cancel,
-        )
-        .await?)
-}
-
-/// 读 Gemini 凭据。所有 LLM provider 共用 ark.* 槽位（persistence 没做 per-provider
-/// 隔离），所以这里也是从 `ArkApiKey` / `ArkModelId` / `ArkEndpoint` 三个槽读，
-/// 但回退默认值改成谷歌的：base_url 默认 `https://generativelanguage.googleapis.com/v1beta`，
-/// 模型默认 `gemini-2.5-flash`。Settings.tsx::onLlmProviderChange 在用户切到 gemini
-/// 时会强制把 endpoint/model 覆盖为这两个默认值，所以 99% 情况下槽里读出来就是
-/// 这两个；这里的 `unwrap_or_else` 是给极端情况兜底（如旧版本切换 bug 留下的脏数据）。
-///
-/// base_url 末尾去掉 `/`，让 `llm_gemini::generate_content_url` 拼接稳定。
-/// 不去 `/chat/completions` 后缀——OpenAI 兼容路径才会有那个后缀，原生 Gemini 不会。
 fn read_gemini_credentials() -> anyhow::Result<(String, String, String)> {
     let api_key = CredentialsVault::get(CredentialAccount::ArkApiKey)?.unwrap_or_default();
     let model = CredentialsVault::get(CredentialAccount::ArkModelId)?
@@ -4168,41 +2975,10 @@ fn schedule_capsule_idle(inner: &Arc<Inner>, delay_ms: u64) {
     let inner_clone = Arc::clone(inner);
     async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-        // 必须 dictation **和** QA 同时空闲才能隐藏胶囊。否则旧 dictation Done timer
-        // 的尾巴会在新 QA 录音/思考中把胶囊意外收掉（issue #118 v2 复现）。
-        let dictation_idle = inner_clone.state.lock().phase == SessionPhase::Idle;
-        let qa_idle = inner_clone.qa_state.lock().phase == QaPhase::Idle;
-        if dictation_idle && qa_idle {
+        if inner_clone.state.lock().phase == SessionPhase::Idle {
             emit_capsule(&inner_clone, CapsuleState::Idle, 0.0, 0, None, None);
         }
     });
-}
-
-/// 与 capture_focus_target 类似，但前台窗口属于本进程（即用户停在 QA / capsule / main
-/// 等自家窗口）时返回 None，让 caller 区分"用户没切到别处" vs "用户切到了另一个真正的
-/// 外部 app"。issue #466 多轮场景下用来刷新 qa_focus_target。
-#[cfg(target_os = "windows")]
-fn capture_external_focus_target() -> Option<usize> {
-    use windows::Win32::System::Threading::GetCurrentProcessId;
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
-
-    unsafe {
-        let hwnd = GetForegroundWindow();
-        if hwnd.0.is_null() {
-            return None;
-        }
-        let mut pid: u32 = 0;
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid == GetCurrentProcessId() {
-            return None;
-        }
-        Some(hwnd.0 as usize)
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn capture_external_focus_target() -> Option<usize> {
-    None
 }
 
 #[cfg(target_os = "windows")]
@@ -4536,17 +3312,15 @@ fn emit_capsule(
 ) {
     let app_opt = inner.app.lock().clone();
     let Some(app) = app_opt else { return };
-    let translation = inner.translation_modifier_seen.load(Ordering::SeqCst);
     let payload = CapsulePayload {
         state,
         level,
         elapsed_ms,
         message,
         inserted_chars,
-        translation,
     };
 
-    // visible / translation 是「这一帧 capsule:state event 的 payload」内容 ——
+    // visible 是「这一帧 capsule:state event 的 payload」内容 ——
     // 必须在 call-site（即音频线程触发 emit_capsule 时）就算定，否则 main thread
     // 闭包里读到的将是「下一帧」的 state，跟实际下发给 JS 的 payload 不一致。
     let visible = !matches!(state, CapsuleState::Idle);
@@ -4578,7 +3352,7 @@ fn emit_capsule(
         // Windows 上 linger 的真实问题（截图选中 / 死区 / 拖拽卡顿）由 #140 加的
         // `hide_capsule_window_if_present()` Win32 hard-hide 在 visible=false 分支
         // 处理，不依赖把 Done/Cancelled/Error 打成 invisible。详见 PR #140 评论。
-        maybe_position_capsule_bottom_center(&inner_for_main, &window, translation);
+        maybe_position_capsule_bottom_center(&inner_for_main, &window);
         if show_capsule && visible {
             // 用户报"看不到胶囊"时第一时间能在 log 里确认：胶囊路径有跑、show_capsule
             // 开关是 true、当前进入 visible 帧 —— 排除 prefs 没存住 / emit_capsule 没触
@@ -4617,7 +3391,6 @@ fn emit_capsule(
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CapsuleLayoutState {
-    translation_active: bool,
     monitor_x: i32,
     monitor_y: i32,
     monitor_width: u32,
@@ -4628,13 +3401,11 @@ struct CapsuleLayoutState {
 fn maybe_position_capsule_bottom_center<R: tauri::Runtime>(
     inner: &Arc<Inner>,
     window: &tauri::WebviewWindow<R>,
-    translation_active: bool,
 ) {
     let Some(monitor) = window.current_monitor().ok().flatten() else {
         return;
     };
     let next = CapsuleLayoutState {
-        translation_active,
         monitor_x: monitor.position().x,
         monitor_y: monitor.position().y,
         monitor_width: monitor.size().width,
@@ -4647,7 +3418,7 @@ fn maybe_position_capsule_bottom_center<R: tauri::Runtime>(
             return;
         }
     }
-    if crate::position_capsule_bottom_center(window, translation_active).is_ok() {
+    if crate::position_capsule_bottom_center(window).is_ok() {
         let mut last = inner.capsule_layout.lock();
         *last = Some(next);
     }

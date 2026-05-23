@@ -117,8 +117,6 @@ export function RecordingInputSection() {
     savePrefs({ ...prefs, allowNonTsfInsertionFallback });
   const onStartMinimizedChange = (startMinimized: boolean) =>
     savePrefs({ ...prefs, startMinimized });
-  const onAutoUpdateCheckChange = (autoUpdateCheck: boolean) =>
-    savePrefs({ ...prefs, autoUpdateCheck });
 
   const choices: Array<[HotkeyMode, string]> = [
     ['toggle', t('settings.recording.modeToggle')],
@@ -262,9 +260,6 @@ export function RecordingInputSection() {
         <AutostartRow />
         <SettingRow label={t('settings.recording.startMinimizedLabel')}>
           <Toggle on={prefs.startMinimized} onToggle={onStartMinimizedChange} />
-        </SettingRow>
-        <SettingRow label={t('settings.recording.autoUpdateCheckLabel')}>
-          <Toggle on={prefs.autoUpdateCheck} onToggle={onAutoUpdateCheckChange} />
         </SettingRow>
         {capability.statusHint && (
           <div style={{ marginTop: 6, fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.5 }}>

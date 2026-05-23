@@ -1,7 +1,7 @@
 // savedEvent.ts — 跨组件的"已保存 / 失败"统一事件通道。
 //
 // 触发：任意组件保存成功 / 失败时调用 emitSaved(...)。
-// 监听：根容器（Settings / Translation / SelectionAsk）通过 useSavedToastListener 订阅，
+// 监听：根容器通过 useSavedToastListener 订阅，
 //   状态喂给 <SavedToast>，pill 浮在右上角。
 //
 // 用 DOM CustomEvent（而不是 React Context）是为了让 CredentialField / ProviderTools

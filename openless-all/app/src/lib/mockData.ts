@@ -1,6 +1,4 @@
-// mockData.ts — typed mirror of design_handoff_openless/data.js.
-// Values must remain identical to the source so the dev UI matches the
-// design canvas pixel-for-pixel.
+// mockData.ts — local demo data for frontend-only states.
 
 export interface MockProvider {
   name: string;
@@ -72,14 +70,14 @@ export const OL_DATA: MockData = {
   ],
   vocab: [
     { word: 'LLM', count: 8 },     { word: 'macOS', count: 8 }, { word: 'openless', count: 4 },
-    { word: 'iOS', count: 3 },     { word: 'GitHub', count: 3 }, { word: 'Codex', count: 2 },
+    { word: 'iOS', count: 3 },     { word: 'Repo', count: 3 },   { word: 'Codex', count: 2 },
     { word: 'Cloud', count: 2 },   { word: 'Hello.', count: 1 }, { word: 'A1003', count: 1 },
     { word: 'SVG', count: 1 },     { word: 'TTC', count: 0 },    { word: 'Swift', count: 0 },
     { word: 'LLMAPI', count: 0 },  { word: 'TypeLazyWordsForm', count: 0 }, { word: 'Meta', count: 0 },
     { word: 'Beta', count: 0 },    { word: 'How', count: 0 },    { word: 'Request', count: 0 },
     { word: 'Pull', count: 0 },    { word: 'Table', count: 0 },  { word: 'README', count: 0 },
     { word: 'issue', count: 0 },   { word: 'PNG', count: 0 },    { word: 'coding', count: 0 },
-    { word: 'Web', count: 0 },     { word: 'QQ', count: 0 },     { word: 'Claude', count: 0 },
+    { word: 'Web', count: 0 },     { word: 'Local', count: 0 },  { word: 'Claude', count: 0 },
   ],
   history: [
     { time: '13:30', style: '清晰结构', dur: '24″', preview: '1. 删除 Windows 部分\n  1) 删除 Windows 部分的代码。\n  2) 删除 Windows 的构建缓存。', tag: '后期模型已参考 28 个词汇表词条进行语义判断' },

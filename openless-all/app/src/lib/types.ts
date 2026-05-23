@@ -107,9 +107,6 @@ export interface ShortcutBinding {
   modifiers: string[];
 }
 
-/** 划词语音问答快捷键绑定。null 表示未启用。详见 issue #118。 */
-export type QaHotkeyBinding = ShortcutBinding;
-
 /** 自定义录音组合键绑定。当 hotkey.trigger == 'custom' 时使用。 */
 export type ComboBinding = ShortcutBinding;
 
@@ -132,10 +129,6 @@ export interface WindowsImeStatus {
   message: string;
   dllPath: string | null;
 }
-
-/** Auto-update 渠道偏好。stable = 跟正式版（默认）；beta = Settings 里多一个
- *  手动下载 Beta 的入口。不影响 plugin-updater 的自动检查路径。 */
-export type UpdateChannel = 'stable' | 'beta';
 
 export interface CustomStylePrompts {
   raw: string;
@@ -232,22 +225,14 @@ export interface UserPreferences {
   pasteShortcut: PasteShortcut;
   /** Windows：TSF 失败后是否允许快捷键粘贴 / 剪贴板兜底。仅在剪贴板写失败时才再试 SendInput。关闭后可验证是否真实 TSF 上屏。 */
   allowNonTsfInsertionFallback: boolean;
-  /** 用户的工作语言（多选，原生名）；作为前提注入 LLM polish/translate prompt 头部。 */
+  /** 用户的工作语言（多选，原生名）；作为前提注入 LLM polish prompt 头部。 */
   workingLanguages: string[];
-  /** 翻译模式目标语言（单选，原生名）；空串 = 不启用 Shift 翻译。详见 issue #4。 */
-  translationTargetLanguage: string;
   /** 中文输出字形偏好：由界面语言（简/繁）自动同步，不单独暴露设置项。 */
   chineseScriptPreference: 'auto' | 'simplified' | 'traditional';
   /** 最终输出语言偏好：由界面语言自动同步，不单独暴露设置项。 */
   outputLanguagePreference: 'auto' | 'zhCn' | 'zhTw' | 'en' | 'ja' | 'ko';
-  /** 划词语音问答快捷键。null = 未启用。详见 issue #118。 */
-  qaHotkey: QaHotkeyBinding | null;
-  /** 是否把 Q&A 历史写到本地存档。详见 issue #118。 */
-  qaSaveHistory: boolean;
   /** 自定义录音组合键。当 hotkey.trigger == 'custom' 时使用。null = 未设置。 */
   customComboHotkey: ComboBinding | null;
-  /** 录音中触发翻译的全局快捷键。默认 Shift。 */
-  translationHotkey: ShortcutBinding;
   /** 切换到上一个润色风格的全局快捷键。 */
   switchStyleHotkey: ShortcutBinding;
   /** 打开 OpenLess 主窗口的全局快捷键。 */
@@ -280,9 +265,6 @@ export interface UserPreferences {
   /** 启动时静默运行（不弹主窗口）。Windows 开机自启场景常用——只想要后台 + 托盘，
    *  不想被主窗口打扰。开后所有启动路径都不弹窗，从菜单栏 / 托盘进入主窗口。默认 false。 */
   startMinimized: boolean;
-  /** 自动更新渠道。'stable'（默认）= plugin-updater 仅检查正式版；
-   *  'beta' = Settings → About 出现手动下载 Beta 的入口。 */
-  updateChannel: UpdateChannel;
   /** 流式输入：润色 SSE 一边到达一边逐字模拟键盘事件输出到当前焦点。开启后用户感知到
    *  的处理时延显著降低。v1 限定 macOS + OpenAI-compatible provider，其他配置自动回落
    *  到原一次性插入。默认 true。 */
@@ -293,9 +275,6 @@ export interface UserPreferences {
   /** 流式输入成功后是否把最终润色文本写回剪贴板。开启后 Cmd+V 还能重复粘贴该次输出，
    *  与一次性路径行为对齐。默认 true。 */
   streamingInsertSaveClipboard: boolean;
-  /** 主窗口启动 + 后台每 60 分钟自动检查云端新版本。默认 true。
-   *  关闭后仅 Settings → 关于 的「检查更新」手动按钮可用。 */
-  autoUpdateCheck: boolean;
   /** 历史记录上限（条数）。null = 走默认 200；5..=200 之间为用户自定义。 */
   historyMaxEntries: number | null;
   /** 是否为每次会话保留原始麦克风音频文件（wav），用于排查 ASR 误识别 / 麦克风灵敏度。
@@ -304,71 +283,11 @@ export interface UserPreferences {
   /** recordings/ 里保留的最近 wav 文件数。null = 跟随 200 硬上限；1..=200 之间为用户自定义。
    *  跟 historyMaxEntries 解耦——「文本档案多但 wav 只留最近 5 条」是合法组合。 */
   audioRecordingMaxEntries: number | null;
-  /** Marketplace HTTP 基地址。空 = 本地开发默认 http://127.0.0.1:8090；生产填 https://api.<domain>。 */
-  marketplaceBaseUrl: string;
-  /** Marketplace dev-mode 模拟登录用户名（GitHub login 风格）。生产换 OAuth token 后此字段废弃。 */
-  marketplaceDevLogin: string;
-}
-
-export interface MarketplaceListItem {
-  id: string;
-  slug: string;
-  name: string;
-  description: string;
-  authorLogin: string;
-  version: string;
-  baseMode: PolishMode;
-  tags: string[];
-  likeCount: number;
-  downloadCount: number;
-  publishedAt: string;
-  updatedAt: string;
-  /** 衍生关系：null = 原创；非空 = 衍生自 originPackId，UI 显「衍生自 @originAuthorLogin」。 */
-  originPackId?: string | null;
-  originAuthorLogin?: string | null;
-}
-
-export interface MarketplaceDetail extends MarketplaceListItem {
-  prompt: string;
-  state: 'pending' | 'approved' | 'rejected';
-}
-
-export interface MarketplaceMyPackItem extends MarketplaceListItem {
-  state: 'pending' | 'approved' | 'rejected' | 'withdrawn' | 'superseded' | string;
 }
 
 export interface MicrophoneDevice {
   name: string;
   isDefault: boolean;
-}
-
-/** Rust 通过 `qa:state` 事件下发的 payload。
- *  v2 (issue #118 v2)：支持多轮对话，messages 数组每次由后端整段下发（单一可信源）。
- *  v2.1：开 `stream:true`，LLM 答案逐 chunk 通过 `answer_delta` 事件推前端边渲染。 */
-export type QaStateKind =
-  | 'idle'
-  | 'recording'
-  | 'loading'
-  | 'thinking'
-  | 'answer_delta'
-  | 'answer'
-  | 'error';
-
-export interface QaChatMessage {
-  role: 'user' | 'assistant';
-  content: string;
-}
-
-export interface QaStatePayload {
-  kind: QaStateKind;
-  /** 后端权威：当前已有的多轮对话历史（user → assistant 交替）。answer 事件带完整版。 */
-  messages?: QaChatMessage[];
-  /** recording 状态时附带的选区预览（前 60 字）。 */
-  selection_preview?: string | null;
-  /** error 状态时附带的提示。 */
-  error?: string;
-  /** answer_delta 事件时附带的本帧增量字符串。 */
-  chunk?: string;
 }
 
 /** 内置语言列表 — 前端 Settings UI 用，后端只接收原生名字符串拼 prompt。
@@ -406,8 +325,6 @@ export interface CapsulePayload {
   elapsedMs: number;
   message: string | null;
   insertedChars: number | null;
-  /** 当前 session 是否处于翻译模式（用户已按过 Shift）。详见 issue #4。 */
-  translation: boolean;
 }
 
 export interface CredentialsStatus {

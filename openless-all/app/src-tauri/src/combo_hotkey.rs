@@ -3,11 +3,9 @@
 //! 与 `hotkey.rs`（modifier-only 听写热键）平行——当用户选择自定义组合键
 //! （如 `Cmd+Shift+D`）时，用 `global-hotkey` crate 注册。
 //!
-//! 与 `qa_hotkey.rs` 的关键区别：**同时产出 Pressed 和 Released 边沿事件**，
-//! 以支持 Hold（按住说话）模式。`global-hotkey` crate 的 `HotKeyState::Released`
-//! 在 macOS (Carbon) 和 Windows 上均可用于检测松开。
-//!
-//! 通过 `global_hotkey_runtime` 与 QA 快捷键共享进程级 manager / event receiver。
+//! 它会同时产出 Pressed 和 Released 边沿事件，以支持 Hold（按住说话）模式。
+//! `global-hotkey` crate 的 `HotKeyState::Released` 在 macOS (Carbon) 和 Windows
+//! 上均可用于检测松开。
 
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
@@ -42,7 +40,6 @@ pub enum ComboHotkeyError {
 /// 自定义组合键全局快捷键监听器。`Drop` 时反注册。
 ///
 /// 内部用 `global-hotkey` crate；事件转发线程持有一个共享的 `Sender`。
-/// 与 `QaHotkeyMonitor` 的区别：转发 Pressed **和** Released 事件。
 pub struct ComboHotkeyMonitor {
     inner: Arc<Inner>,
 }
@@ -53,7 +50,7 @@ struct Inner {
 }
 
 // global-hotkey 0.6 的 GlobalHotKeyManager 在 Windows 内部持有 HHOOK / window
-// handle 等 `*mut c_void`，crate 没标 Send/Sync。与 qa_hotkey.rs 同理。
+// handle 等 `*mut c_void`，crate 没标 Send/Sync。
 unsafe impl Send for Inner {}
 unsafe impl Sync for Inner {}
 

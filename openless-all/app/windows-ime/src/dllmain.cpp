@@ -15,7 +15,7 @@ BOOL APIENTRY DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
 
   // 不调用 DisableThreadLibraryCalls：DLL 现在用 /MT 静态链接 CRT，CRT 需要
   // DLL_THREAD_ATTACH / DLL_THREAD_DETACH 通知做 per-thread TLS 初始化与清理。
-  // 在 host 进程（如 QQ / Office）切输入法新建 input thread 时禁用通知，会让
+  // 在宿主进程切输入法新建 input thread 时禁用通知，会让
   // 静态 CRT 的 thread-local 资源泄漏 / 行为不稳定，反而把这次想修的崩溃问题
   // 重新引回来。详见 Microsoft 文档 DisableThreadLibraryCalls 备注。
   if (reason == DLL_PROCESS_ATTACH) {

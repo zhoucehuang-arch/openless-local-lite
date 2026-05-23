@@ -6,12 +6,10 @@ import { RecordingInputSection } from './RecordingInputSection';
 import { ShortcutsSection } from './ShortcutsSection';
 import { LanguageSection } from './LanguageSection';
 import { ProvidersSection } from './ProvidersSection';
-import { MarketplaceSection } from './MarketplaceSection';
 import { PermissionsSection } from './PermissionsSection';
 import { DataStorageSection } from './DataStorageSection';
 import { LocalModelSection } from './LocalModelSection';
 import { DebugToolsSection } from './DebugToolsSection';
-import { BetaChannelSection } from './BetaChannelSection';
 
 // 通用：录音与输入 · 快捷键 · 语言。
 export function GeneralTab() {
@@ -29,7 +27,6 @@ export function ServicesTab() {
   return (
     <>
       <ProvidersSection />
-      <MarketplaceSection />
     </>
   );
 }
@@ -72,7 +69,6 @@ export function AdvancedTab() {
     <>
       <LocalModelSection />
       <DebugToolsSection />
-      <BetaChannelSection />
     </>
   );
 }

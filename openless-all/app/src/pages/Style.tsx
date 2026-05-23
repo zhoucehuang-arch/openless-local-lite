@@ -12,14 +12,11 @@ import {
   resetBuiltinStylePack,
   saveStylePack,
   setActiveStylePack,
-  uploadMarketplacePack,
 } from '../lib/ipc';
-import { useHotkeySettings } from '../state/HotkeySettingsContext';
 import type { PolishMode, StylePack, StylePackExample, StylePackRuntimeDiagnostics } from '../lib/types';
 import { Btn, Card, PageHeader, Pill } from './_atoms';
 import { Icon } from '../components/Icon';
 import { SavedToast, type SaveToastState } from '../components/SavedToast';
-import { MarketplaceModal } from '../components/MarketplaceModal';
 
 type BusyAction =
   | 'loading'
@@ -121,8 +118,6 @@ function sanitizeZipFileName(name: string) {
 
 export function Style() {
   const { t } = useTranslation();
-  const { prefs: marketplacePrefs } = useHotkeySettings();
-  const canPublish = (marketplacePrefs?.marketplaceDevLogin ?? '').trim().length > 0;
 
   const [packs, setPacks] = useState<StylePack[]>([]);
 
@@ -137,7 +132,6 @@ export function Style() {
   const editorCloseTimer = useRef<number | null>(null);
   const [runtimePreview, setRuntimePreview] = useState<StylePackRuntimeDiagnostics | null>(null);
   const [runtimePreviewError, setRuntimePreviewError] = useState<string | null>(null);
-  const [marketplaceOpen, setMarketplaceOpen] = useState(false);
 
   useEffect(() => () => {
     if (statusTimer.current !== null) window.clearTimeout(statusTimer.current);
@@ -459,30 +453,6 @@ export function Style() {
     }
   };
 
-  const handlePublishToMarketplace = async (pack = selectedPack) => {
-    if (!pack) return;
-    // 内置 pack 是只读模板，不能直接上传 —— 改它得先「在官方上面做一份」克隆出 imported。
-    if (pack.kind === 'builtin') {
-      showSaveStatus('failed', t('style.pack.publishBuiltinRejected'));
-      return;
-    }
-    setBusy('exporting');
-    try {
-      // 若编辑器有未保存改动且就是当前要发布的 pack，先自动保存再发布。
-      if (editorOpen && dirty && draft && selectedPack && pack.id === selectedPack.id) {
-        const saved = await saveStylePack({ ...draft, tags: draft.tags.filter(Boolean) });
-        await loadPacks(saved.id);
-        pack = saved;
-      }
-      await uploadMarketplacePack(pack.id);
-      showSaveStatus('saved', t('style.pack.publishSuccess'), true);
-    } catch (publishError) {
-      showSaveStatus('failed', t('style.pack.publishFailed', { err: String(publishError) }));
-    } finally {
-      setBusy(null);
-    }
-  };
-
   const handleExportZip = async (pack = selectedPack) => {
     if (!pack) return;
     if (editorOpen && dirty && selectedPack && pack.id === selectedPack.id) {
@@ -523,10 +493,6 @@ export function Style() {
         desc={t('style.pack.desc')}
         right={(
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end', marginTop: 40 }}>
-            {/* 风格市场入口：放在 刷新 左边（按用户需求）。点击 → 全屏弹框承载 <Marketplace />。*/}
-            <Btn variant="ghost" icon="cloud" onClick={() => setMarketplaceOpen(true)}>
-              {t('style.pack.marketplaceBtn')}
-            </Btn>
             <Btn variant="ghost" icon="refresh" onClick={() => void loadPacks(selectedId)} disabled={busy === 'loading'}>
               {t('common.refresh')}
             </Btn>
@@ -540,16 +506,6 @@ export function Style() {
       {/* 控制台卡右上角锚定 —— 与「风格市场 / 刷新 / 导入 ZIP」按钮同区；
           淡蓝 pill 只闪现 0.8s，不长期遮挡按钮。 */}
       <SavedToast saveState={saveState} message={saveMessage} />
-
-      {marketplaceOpen && (
-        <MarketplaceModal
-          onClose={() => {
-            setMarketplaceOpen(false);
-            // 用户可能在 modal 内安装过远端 pack；关闭后刷新本地列表，避免新装的看不到。
-            void loadPacks();
-          }}
-        />
-      )}
 
       <Card padding={0} style={{ overflow: 'hidden', flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           <div style={{ padding: 18, borderBottom: '0.5px solid var(--ol-line)', flexShrink: 0 }}>
@@ -635,12 +591,6 @@ export function Style() {
                         <Pill tone={isBuiltin ? 'outline' : 'blue'} size="sm">
                           {isBuiltin ? t('style.pack.builtin') : t('style.pack.imported')}
                         </Pill>
-                        {pack.originAuthorLogin
-                          && pack.originAuthorLogin !== (marketplacePrefs?.marketplaceDevLogin ?? '').trim() && (
-                          <span title={t('style.pack.derivativeBadge', { login: pack.originAuthorLogin })}>
-                            <Pill tone="ok" size="sm">{t('style.pack.derivativeBadge', { login: pack.originAuthorLogin })}</Pill>
-                          </span>
-                        )}
                         {pack.active && <Pill tone="dark" size="sm">{t('style.pack.active')}</Pill>}
                       </div>
                       <div
@@ -877,24 +827,6 @@ export function Style() {
                       <Btn variant="ghost" icon="archive" onClick={() => void handleExportZip()} disabled={busy === 'exporting'}>
                         {t('style.pack.exportZip')}
                       </Btn>
-                      <span
-                        title={
-                          draft?.kind === 'builtin'
-                            ? t('style.pack.publishBuiltinRejected')
-                            : !canPublish
-                              ? t('style.pack.publishDisabledHint')
-                              : ''
-                        }
-                      >
-                        <Btn
-                          variant="ghost"
-                          icon="cloud"
-                          onClick={() => void handlePublishToMarketplace()}
-                          disabled={!canPublish || draft?.kind === 'builtin' || busy === 'exporting'}
-                        >
-                          {draft?.originPackId ? t('style.pack.updateMarketplace') : t('style.pack.publishMarketplace')}
-                        </Btn>
-                      </span>
                       <Btn
                         variant={draft.active ? 'soft' : 'blue'}
                         icon="check"

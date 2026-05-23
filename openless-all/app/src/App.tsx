@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react';
-import { AutoUpdateGate } from './components/AutoUpdateGate';
 import { Capsule } from './components/Capsule';
 import { FloatingShell } from './components/FloatingShell';
 import { Onboarding } from './components/Onboarding';
@@ -16,23 +15,18 @@ import {
   isWindowHotkeyKeyboardCandidate,
   windowMouseHotkeyCode,
 } from './lib/windowHotkeyFallback';
-import { QaPanel } from './pages/QaPanel';
 import { HotkeySettingsProvider } from './state/HotkeySettingsContext';
 
 interface AppProps {
   isCapsule: boolean;
-  isQa: boolean;
   forcedOs?: OS | null;
 }
 
 type Gate = 'checking' | 'onboarding' | 'ready';
 
-export function App({ isCapsule, isQa, forcedOs }: AppProps) {
+export function App({ isCapsule, forcedOs }: AppProps) {
   if (isCapsule) {
     return <Capsule />;
-  }
-  if (isQa) {
-    return <QaPanel />;
   }
 
   const os = forcedOs ?? detectOS();
@@ -175,7 +169,6 @@ export function App({ isCapsule, isQa, forcedOs }: AppProps) {
   return (
     <HotkeySettingsProvider>
       {gate === 'onboarding' ? <Onboarding onComplete={() => setGate('ready')} /> : <FloatingShell os={os} />}
-      {gate === 'ready' && <AutoUpdateGate />}
     </HotkeySettingsProvider>
   );
 }
@@ -214,7 +207,7 @@ function StartupShell() {
         }}
       >
         <img src="AppIcon.png" alt="" style={{ width: 18, height: 18, borderRadius: 4 }} />
-        <span>OpenLess 正在启动</span>
+        <span>OpenLess Local 正在启动</span>
       </div>
     </div>
   );

@@ -1,11 +1,12 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::coordinator_state::request_stop_during_starting_state;
 use crate::correction::apply_correction_rules;
+use crate::recorder::RecorderError;
 use crate::types::HotkeyMode;
 
-use super::qa::handle_qa_option_edge;
 use super::resources::*;
 use super::*;
 
@@ -352,7 +353,6 @@ where
 
 fn finalize_polished_text(
     polished: String,
-    translation_active: bool,
     _raw_uses_llm: bool,
     mode: PolishMode,
     polish_error: &Option<String>,
@@ -363,11 +363,7 @@ fn finalize_polished_text(
     if already_streamed {
         return polished;
     }
-    let should_force_script = if translation_active {
-        polish_error.is_some()
-    } else {
-        mode == PolishMode::Raw || polish_error.is_some()
-    };
+    let should_force_script = mode == PolishMode::Raw || polish_error.is_some();
     let polished = if should_force_script {
         apply_chinese_script_preference(&polished, chinese_script_preference)
     } else {
@@ -390,11 +386,10 @@ fn finalize_polished_text(
 
 fn streaming_insert_eligible(
     streaming_insert_enabled: bool,
-    translation_active: bool,
     mode: PolishMode,
     raw_uses_llm: bool,
 ) -> bool {
-    streaming_insert_enabled && !translation_active && (mode != PolishMode::Raw || raw_uses_llm)
+    streaming_insert_enabled && (mode != PolishMode::Raw || raw_uses_llm)
 }
 
 fn default_done_message(status: InsertStatus, polish_failed: bool) -> Option<String> {
@@ -438,19 +433,7 @@ pub(super) async fn handle_pressed_edge(inner: &Arc<Inner>) {
             return;
         }
 
-        // 路由：QA 浮窗可见时，rightOption 边沿走 QA；否则走主听写。详见 issue #118 v2。
-        // 例外：dictation session 已经在跑（Starting / Listening / Processing / Inserting），
-        // 即使 QA 浮窗被打开了，这条边沿也必须先走 dictation。否则 begin_qa_session 会
-        // 第二次抢同一个麦克风 device —— 在 Linux/PipeWire 上甚至会成功打开两路捕获，
-        // dictation 的 recorder 没人停；在 macOS/Windows 上 cpal 会拒绝第二次 build_input_stream
-        // 但 dictation session 仍在跑、用户找不到从 QA 面板停掉它的入口。审计 3.3.1。
-        let dictation_active = !matches!(inner.state.lock().phase, SessionPhase::Idle);
-        let panel_visible = inner.qa_state.lock().panel_visible;
-        if panel_visible && !dictation_active {
-            handle_qa_option_edge(inner).await;
-        } else {
-            handle_pressed(inner).await;
-        }
+        handle_pressed(inner).await;
     }
 }
 
@@ -480,15 +463,6 @@ pub(super) async fn handle_pressed(inner: &Arc<Inner>) {
 pub(super) async fn handle_released_edge(inner: &Arc<Inner>) {
     let was_held = inner.hotkey_trigger_held.swap(false, Ordering::SeqCst);
     if was_held {
-        // QA 浮窗可见时，Option 行为是 press-toggle（不分 hold/release），release 边沿忽略。
-        // 与 handle_pressed_edge 的路由对称：dictation session 在跑时 Pressed 已经被路由到
-        // dictation，那 Released 必须也路由到 dictation —— 否则 Hold 模式松开热键时
-        // end_session 不会触发，dictation 永远停不下来。审计 3.3.1。
-        let dictation_active = !matches!(inner.state.lock().phase, SessionPhase::Idle);
-        let panel_visible = inner.qa_state.lock().panel_visible;
-        if panel_visible && !dictation_active {
-            return;
-        }
         handle_released(inner).await;
     }
 }
@@ -541,11 +515,6 @@ pub(super) async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
         let mut slots = inner.prepared_windows_ime_session.lock();
         store_prepared_windows_ime_session(&mut slots, current_session_id, prepared);
     }
-    // 翻译模式标志重置；hotkey 监听器在 Shift down 时再 set true。
-    inner
-        .translation_modifier_seen
-        .store(false, Ordering::SeqCst);
-
     #[cfg(any(debug_assertions, test))]
     if hotkey_injection_dry_run_enabled() {
         emit_capsule(inner, CapsuleState::Recording, 0.0, 0, None, None);
@@ -1495,11 +1464,8 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     let llm_thinking_enabled = prefs.llm_thinking_enabled;
     let style_system_prompt = pack.prompt.clone();
     let raw_uses_llm = mode == PolishMode::Raw && super::raw_style_pack_uses_llm(&pack);
-    let translation_target = prefs.translation_target_language.trim().to_string();
-    let translation_active =
-        inner.translation_modifier_seen.load(Ordering::SeqCst) && !translation_target.is_empty();
     log::info!(
-        "[style-pack] runtime dispatch session_id={} active_pack={} kind={:?} mode={:?} raw_chars={} prompt_chars={} raw_uses_llm={} translation_active={} hotwords={} working_languages={:?}",
+        "[style-pack] runtime dispatch session_id={} active_pack={} kind={:?} mode={:?} raw_chars={} prompt_chars={} raw_uses_llm={} hotwords={} working_languages={:?}",
         current_session_id,
         pack.id,
         pack.kind,
@@ -1507,16 +1473,14 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         raw.text.chars().count(),
         style_system_prompt.chars().count(),
         raw_uses_llm,
-        translation_active,
         hotword_strs.len(),
         working_languages
     );
-    // 对话感知 polish：拉最近 N 分钟的会话作为 LLM 上下文。仅在非翻译路径且非 Raw mode
-    // 才有意义（Raw 不走 LLM、翻译走单轮独立 prompt）。窗口=0 时 prior_turns 是空 Vec，
+    // 对话感知 polish：拉最近 N 分钟的会话作为 LLM 上下文。仅在非 Raw mode
+    // 才有意义（Raw 不走 LLM）。窗口=0 时 prior_turns 是空 Vec，
     // polish 路径自动退化成单轮单消息——跟历史行为一致。
     let polish_context_window_minutes = prefs.polish_context_window_minutes;
-    let prior_turns: Vec<(String, String)> = if !translation_active
-        && (mode != PolishMode::Raw || raw_uses_llm)
+    let prior_turns: Vec<(String, String)> = if (mode != PolishMode::Raw || raw_uses_llm)
         && polish_context_window_minutes > 0
     {
         match inner
@@ -1538,37 +1502,18 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     } else {
         Vec::new()
     };
-    // 流式插入 opt-in 路径：开关打开 + 非翻译 + 非 Raw 模式 → 进入流式分支。
+    // 流式插入 opt-in 路径：开关打开 + 非 Raw 模式 → 进入流式分支。
     // 任何不满足都走原一次性 polish_or_passthrough 路径，行为跟历史完全一致。
     let streaming_eligible = streaming_insert_eligible(
         prefs.streaming_insert,
-        translation_active,
         mode,
         raw_uses_llm,
     );
     log::info!(
-        "[coord] polish dispatch: translation={translation_active} mode={mode:?} streaming_eligible={streaming_eligible}"
+        "[coord] polish dispatch: mode={mode:?} streaming_eligible={streaming_eligible}"
     );
 
-    let (polished, polish_error, already_streamed) = if translation_active {
-        log::info!(
-            "[coord] translation mode → target=\u{300C}{}\u{300D} working={:?} front_app={:?}",
-            translation_target,
-            working_languages,
-            front_app
-        );
-        let (p, e) = translate_or_passthrough(
-            &raw,
-            &translation_target,
-            &working_languages,
-            chinese_script_preference,
-            output_language_preference,
-            llm_thinking_enabled,
-            front_app.as_deref(),
-        )
-        .await;
-        (p, e, false)
-    } else if streaming_eligible {
+    let (polished, polish_error, already_streamed) = if streaming_eligible {
         run_streaming_polish(
             inner,
             &raw,
@@ -1602,7 +1547,6 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
 
     let polished = finalize_polished_text(
         polished,
-        translation_active,
         raw_uses_llm,
         mode,
         &polish_error,

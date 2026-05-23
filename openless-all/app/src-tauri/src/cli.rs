@@ -1,11 +1,11 @@
-//! 极简 CLI 参数解析 — 用于支持桌面环境快捷键调起 OpenLess 触发听写 / QA。
+//! 极简 CLI 参数解析 — 用于支持桌面环境快捷键调起 OpenLess 触发听写。
 //!
 //! 这条路径的来历：Linux 上 fcitx5 插件提供了热键 + 文字提交的完整方案，
 //! `openless --toggle-dictation` → tauri-plugin-single-instance 转发的 CLI 路径。
 //! macOS / Windows 上仍走原生 hotkey 监听器，CLI 是补充而非替代。
 //!
 //! 解析约束：
-//! - **不依赖 clap**。CLI surface 极小（4 个 flag、无子命令），引入 clap 既增加二进制体积
+//! - **不依赖 clap**。CLI surface 极小（2 个 flag、无子命令），引入 clap 既增加二进制体积
 //!   也带来「未知参数即 panic exit」的风险——GUI app 必须吃下未知参数照常起来，否则
 //!   .desktop launcher 或发行版包装传 dragged-in 文件路径就直接崩。
 //! - **未知参数静默忽略**。第一个能识别的 flag 即返回；其他参数（路径 / 自动注入的
@@ -20,8 +20,6 @@
 pub enum CliIntent {
     /// 等价于按一次主听写热键：Idle → 开始；Listening → 结束。
     ToggleDictation,
-    /// 等价于按一次 QA 热键：toggle QA 浮窗显隐。
-    ToggleQa,
     /// 等价于按 Esc：取消当前听写 session。
     CancelDictation,
 }
@@ -36,7 +34,6 @@ pub fn parse_cli_intent<S: AsRef<str>>(args: &[S]) -> Option<CliIntent> {
     for arg in args.iter().skip(1) {
         match arg.as_ref() {
             "--toggle-dictation" => return Some(CliIntent::ToggleDictation),
-            "--toggle-qa" => return Some(CliIntent::ToggleQa),
             "--cancel-dictation" | "--cancel" => return Some(CliIntent::CancelDictation),
             _ => {}
         }
@@ -68,11 +65,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_recognizes_toggle_qa() {
-        let args = vec!["openless", "--toggle-qa"];
-        assert_eq!(parse_cli_intent(&args), Some(CliIntent::ToggleQa));
-    }
-
     #[test]
     fn parse_recognizes_cancel_dictation() {
         let args = vec!["openless", "--cancel-dictation"];
@@ -96,7 +88,7 @@ mod tests {
     #[test]
     fn parse_returns_first_matching_intent() {
         // 多个 flag 时取首个，确定行为。
-        let args = vec!["openless", "--toggle-dictation", "--toggle-qa"];
+        let args = vec!["openless", "--toggle-dictation", "--cancel"];
         assert_eq!(parse_cli_intent(&args), Some(CliIntent::ToggleDictation));
     }
 

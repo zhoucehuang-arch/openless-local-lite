@@ -60,21 +60,6 @@ pub enum PasteShortcut {
     ShiftInsert,
 }
 
-/// Auto-update 渠道。决定 Settings → 关于 里展示哪一类版本信息。
-/// `Stable` 沿用 `tauri-plugin-updater` 的默认 endpoints（即 `tauri.conf.json`
-/// 里的 `latest-{{target}}-{{arch}}.json`），与发版 pipeline 对齐。
-/// `Beta` 不动 plugin endpoints —— 只解锁 Settings 里"手动下载最新 Beta"的入口
-/// （fetch GitHub `prerelease` + 跳浏览器），物理隔离 Beta 包不会通过 auto-update
-/// 推到正式版用户。详见 README 的"Contributing workflow"和 CLAUDE.md 的
-/// `Branch & release-channel workflow` 段落。
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum UpdateChannel {
-    #[default]
-    Stable,
-    Beta,
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum InsertStatus {
@@ -276,9 +261,8 @@ pub struct StylePack {
     pub active: bool,
     pub recommended_model: Option<String>,
     pub compatible_app_version: Option<String>,
-    /// 衍生关系：从 marketplace 安装时记录 upstream pack id；
-    /// 后续编辑 + 发布时客户端把这两个字段带到 backend，让 backend 判 supersede vs derivative。
-    /// 全新本地创建的 pack 这两个字段为 None。
+    /// 衍生关系：从旧版或导入包继承 upstream pack id。
+    /// 本地轻量版只保留读取兼容；全新本地创建的 pack 这两个字段为 None。
     pub origin_pack_id: Option<String>,
     pub origin_author_login: Option<String>,
 }
@@ -549,14 +533,9 @@ pub struct UserPreferences {
     /// 默认开启以保持可用性；关闭后可验证文本是否真正由 TSF 上屏。
     #[serde(default = "default_true")]
     pub allow_non_tsf_insertion_fallback: bool,
-    /// 用户的工作语言（多选，原生名）。会作为前提注入 LLM polish/translate 的 system prompt 头部，
-    /// 让模型知道该用户在哪些语言间工作。详见 issue #4。
+    /// 用户的工作语言（多选，原生名）。会作为前提注入 LLM polish system prompt 头部。
     #[serde(default = "default_working_languages")]
     pub working_languages: Vec<String>,
-    /// 翻译输出的目标语言（单选，原生名）。空串 = 不启用翻译模式（Shift 组合键无效）。
-    /// 由前端从内置语言列表中选择，后端只接收最终的原生名字符串拼进 prompt。详见 issue #4。
-    #[serde(default)]
-    pub translation_target_language: String,
     /// 中文输出字形偏好（不额外暴露为 UI 开关）：
     /// - Simplified: 中文输出优先简体
     /// - Traditional: 中文输出优先繁体
@@ -569,22 +548,11 @@ pub struct UserPreferences {
     /// 由前端「界面语言」选择同步驱动：zh-CN/zh-TW/en/ja/ko，其他为 Auto。
     #[serde(default)]
     pub output_language_preference: OutputLanguagePreference,
-    /// 划词语音问答（QA）的全局快捷键。`None` = 关闭功能；`Some(...)` 时
-    /// coordinator 用 global-hotkey crate 注册组合键（modifier + 主键）。
-    /// 默认 Cmd+Shift+; (macOS) / Ctrl+Shift+; (Windows)。详见 issue #118。
-    #[serde(default = "default_qa_hotkey")]
-    pub qa_hotkey: Option<ShortcutBinding>,
-    /// 是否把每次 QA 会话写进 history.json。默认 false：QA 默认临时不留痕。
-    /// 详见 issue #118。
-    #[serde(default)]
-    pub qa_save_history: bool,
     /// 自定义录音组合键。当 `hotkey.trigger == Custom` 时，coordinator 用
     /// `global-hotkey` crate 注册此组合键（支持 Toggle + Hold 模式）。
     /// `None` 且 trigger == Custom 表示用户选了自定义但还没录制。
     #[serde(default)]
     pub custom_combo_hotkey: Option<ComboBinding>,
-    #[serde(default = "default_translation_hotkey")]
-    pub translation_hotkey: ShortcutBinding,
     #[serde(default = "default_switch_style_hotkey")]
     pub switch_style_hotkey: ShortcutBinding,
     #[serde(default = "default_open_app_hotkey")]
@@ -624,10 +592,6 @@ pub struct UserPreferences {
     /// foundry/qwen3 一致。
     #[serde(default = "default_local_asr_keep_loaded_secs")]
     pub sherpa_onnx_keep_loaded_secs: u32,
-    /// Auto-update 渠道偏好。stable = 跟正式版（默认）；beta = Settings 里多
-    /// 一个手动下载 Beta 的入口。不影响 plugin-updater 的自动检查路径。
-    #[serde(default)]
-    pub update_channel: UpdateChannel,
     /// 历史记录保留天数。0 = 不按时间清理（仅受 200 条上限）。默认 7 天。
     /// 写入新条目时执行清理，避免后台轮询。
     #[serde(default = "default_history_retention_days")]
@@ -671,10 +635,6 @@ pub struct UserPreferences {
     /// 默认 true（更接近用户习惯）。
     #[serde(default = "default_true")]
     pub streaming_insert_save_clipboard: bool,
-    /// 主窗口启动 + 后台每 60 分钟自动检查云端新版本。默认 true。
-    /// 用户在 Settings → 关于 里可关。关闭后仅手动「检查更新」按钮可用。
-    #[serde(default = "default_true")]
-    pub auto_update_check: bool,
     /// 历史记录上限（条数）。`None` = 使用代码内 200 条硬上限；
     /// `Some(n)` 表示用户在 Settings 自定义了上限（5..=200 之间）。
     #[serde(default)]
@@ -690,14 +650,6 @@ pub struct UserPreferences {
     /// 这种「文本档案多 + 录音不占盘」组合下精确控制。
     #[serde(default)]
     pub audio_recording_max_entries: Option<u32>,
-    /// Style Pack Marketplace HTTP 基地址。空 = 本地开发默认 http://127.0.0.1:8090；
-    /// 用户在 Settings 里填生产 URL (如 https://api.openless-marketplace.com)。
-    #[serde(default)]
-    pub marketplace_base_url: String,
-    /// Marketplace dev-mode 模拟登录用户名（GitHub login 风格）。生产换 OAuth token 后此字段废弃。
-    /// 上传 / 点赞需要带这个 header；空时上传被后端 401。
-    #[serde(default)]
-    pub marketplace_dev_login: String,
 }
 
 fn default_local_asr_model() -> String {
@@ -771,14 +723,18 @@ struct UserPreferencesWire {
     paste_shortcut: PasteShortcut,
     allow_non_tsf_insertion_fallback: bool,
     working_languages: Vec<String>,
-    translation_target_language: String,
+    #[serde(default, rename = "translationTargetLanguage")]
+    _translation_target_language: String,
     chinese_script_preference: ChineseScriptPreference,
     #[serde(default)]
     output_language_preference: OutputLanguagePreference,
-    qa_hotkey: Option<ShortcutBinding>,
-    qa_save_history: bool,
+    #[serde(default, rename = "qaHotkey")]
+    _qa_hotkey: Option<ShortcutBinding>,
+    #[serde(default, rename = "qaSaveHistory")]
+    _qa_save_history: bool,
     custom_combo_hotkey: Option<ComboBinding>,
-    translation_hotkey: Option<ShortcutBinding>,
+    #[serde(default, rename = "translationHotkey")]
+    _translation_hotkey: Option<ShortcutBinding>,
     switch_style_hotkey: Option<ShortcutBinding>,
     open_app_hotkey: Option<ShortcutBinding>,
     #[serde(default = "default_local_asr_model")]
@@ -801,8 +757,6 @@ struct UserPreferencesWire {
     sherpa_onnx_language_hint: String,
     #[serde(default = "default_local_asr_keep_loaded_secs")]
     sherpa_onnx_keep_loaded_secs: u32,
-    #[serde(default)]
-    update_channel: UpdateChannel,
     #[serde(default = "default_history_retention_days")]
     history_retention_days: u32,
     #[serde(default = "default_polish_context_window_minutes")]
@@ -815,18 +769,18 @@ struct UserPreferencesWire {
     streaming_insert_default_migrated: bool,
     #[serde(default = "default_true")]
     streaming_insert_save_clipboard: bool,
-    #[serde(default = "default_true")]
-    auto_update_check: bool,
+    #[serde(default, rename = "autoUpdateCheck")]
+    _auto_update_check: bool,
     #[serde(default)]
     history_max_entries: Option<u32>,
     #[serde(default)]
     record_audio_for_debug: bool,
     #[serde(default)]
     audio_recording_max_entries: Option<u32>,
-    #[serde(default)]
-    marketplace_base_url: String,
-    #[serde(default)]
-    marketplace_dev_login: String,
+    #[serde(default, rename = "marketplaceBaseUrl")]
+    _marketplace_base_url: String,
+    #[serde(default, rename = "marketplaceDevLogin")]
+    _marketplace_dev_login: String,
 }
 
 impl Default for UserPreferencesWire {
@@ -851,13 +805,13 @@ impl Default for UserPreferencesWire {
             paste_shortcut: prefs.paste_shortcut,
             allow_non_tsf_insertion_fallback: prefs.allow_non_tsf_insertion_fallback,
             working_languages: prefs.working_languages,
-            translation_target_language: prefs.translation_target_language,
+            _translation_target_language: String::new(),
             chinese_script_preference: prefs.chinese_script_preference,
             output_language_preference: prefs.output_language_preference,
-            qa_hotkey: prefs.qa_hotkey,
-            qa_save_history: prefs.qa_save_history,
+            _qa_hotkey: None,
+            _qa_save_history: false,
             custom_combo_hotkey: prefs.custom_combo_hotkey,
-            translation_hotkey: None,
+            _translation_hotkey: None,
             switch_style_hotkey: None,
             open_app_hotkey: None,
             local_asr_active_model: prefs.local_asr_active_model,
@@ -870,19 +824,18 @@ impl Default for UserPreferencesWire {
             sherpa_onnx_model: prefs.sherpa_onnx_model,
             sherpa_onnx_language_hint: prefs.sherpa_onnx_language_hint,
             sherpa_onnx_keep_loaded_secs: prefs.sherpa_onnx_keep_loaded_secs,
-            update_channel: prefs.update_channel,
             history_retention_days: prefs.history_retention_days,
             polish_context_window_minutes: prefs.polish_context_window_minutes,
             start_minimized: prefs.start_minimized,
             streaming_insert: prefs.streaming_insert,
             streaming_insert_default_migrated: prefs.streaming_insert_default_migrated,
             streaming_insert_save_clipboard: prefs.streaming_insert_save_clipboard,
-            auto_update_check: prefs.auto_update_check,
+            _auto_update_check: false,
             history_max_entries: prefs.history_max_entries,
             record_audio_for_debug: prefs.record_audio_for_debug,
             audio_recording_max_entries: prefs.audio_recording_max_entries,
-            marketplace_base_url: prefs.marketplace_base_url,
-            marketplace_dev_login: prefs.marketplace_dev_login,
+            _marketplace_base_url: String::new(),
+            _marketplace_dev_login: String::new(),
         }
     }
 }
@@ -929,15 +882,9 @@ impl<'de> Deserialize<'de> for UserPreferences {
             paste_shortcut: wire.paste_shortcut,
             allow_non_tsf_insertion_fallback: wire.allow_non_tsf_insertion_fallback,
             working_languages: wire.working_languages,
-            translation_target_language: wire.translation_target_language,
             chinese_script_preference: wire.chinese_script_preference,
             output_language_preference: wire.output_language_preference,
-            qa_hotkey: wire.qa_hotkey,
-            qa_save_history: wire.qa_save_history,
             custom_combo_hotkey: wire.custom_combo_hotkey,
-            translation_hotkey: wire
-                .translation_hotkey
-                .unwrap_or_else(default_translation_hotkey),
             switch_style_hotkey: wire
                 .switch_style_hotkey
                 .unwrap_or_else(default_switch_style_hotkey),
@@ -955,31 +902,16 @@ impl<'de> Deserialize<'de> for UserPreferences {
             sherpa_onnx_model: wire.sherpa_onnx_model,
             sherpa_onnx_language_hint: wire.sherpa_onnx_language_hint,
             sherpa_onnx_keep_loaded_secs: wire.sherpa_onnx_keep_loaded_secs,
-            update_channel: wire.update_channel,
             history_retention_days: wire.history_retention_days,
             polish_context_window_minutes: wire.polish_context_window_minutes,
             start_minimized: wire.start_minimized,
             streaming_insert,
             streaming_insert_default_migrated: true,
             streaming_insert_save_clipboard: wire.streaming_insert_save_clipboard,
-            auto_update_check: wire.auto_update_check,
             history_max_entries: wire.history_max_entries,
             record_audio_for_debug: wire.record_audio_for_debug,
             audio_recording_max_entries: wire.audio_recording_max_entries,
-            marketplace_base_url: wire.marketplace_base_url,
-            marketplace_dev_login: wire.marketplace_dev_login,
         })
-    }
-}
-
-fn default_qa_hotkey() -> Option<ShortcutBinding> {
-    Some(ShortcutBinding::default_qa())
-}
-
-fn default_translation_hotkey() -> ShortcutBinding {
-    ShortcutBinding {
-        primary: "Shift".into(),
-        modifiers: Vec::new(),
     }
 }
 
@@ -1622,13 +1554,9 @@ impl Default for UserPreferences {
             paste_shortcut: PasteShortcut::default(),
             allow_non_tsf_insertion_fallback: true,
             working_languages: default_working_languages(),
-            translation_target_language: String::new(),
             chinese_script_preference: ChineseScriptPreference::Auto,
             output_language_preference: OutputLanguagePreference::Auto,
-            qa_hotkey: default_qa_hotkey(),
-            qa_save_history: false,
             custom_combo_hotkey: None,
-            translation_hotkey: default_translation_hotkey(),
             switch_style_hotkey: default_switch_style_hotkey(),
             open_app_hotkey: default_open_app_hotkey(),
             local_asr_active_model: default_local_asr_model(),
@@ -1641,19 +1569,15 @@ impl Default for UserPreferences {
             sherpa_onnx_model: default_sherpa_onnx_model(),
             sherpa_onnx_language_hint: String::new(),
             sherpa_onnx_keep_loaded_secs: default_local_asr_keep_loaded_secs(),
-            update_channel: UpdateChannel::default(),
             history_retention_days: default_history_retention_days(),
             polish_context_window_minutes: default_polish_context_window_minutes(),
             start_minimized: false,
             streaming_insert: true,
             streaming_insert_default_migrated: true,
             streaming_insert_save_clipboard: true,
-            auto_update_check: true,
             history_max_entries: None,
             record_audio_for_debug: false,
             audio_recording_max_entries: None,
-            marketplace_base_url: String::new(),
-            marketplace_dev_login: String::new(),
         }
     }
 }
@@ -1666,23 +1590,6 @@ pub struct ShortcutBinding {
 }
 
 impl ShortcutBinding {
-    pub fn default_qa() -> Self {
-        #[cfg(target_os = "macos")]
-        {
-            Self {
-                primary: ";".into(),
-                modifiers: vec!["cmd".into(), "shift".into()],
-            }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            Self {
-                primary: ";".into(),
-                modifiers: vec!["ctrl".into(), "shift".into()],
-            }
-        }
-    }
-
     pub fn display_label(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
         let modifier_order = ["cmd", "ctrl", "alt", "shift", "super"];
@@ -1696,57 +1603,7 @@ impl ShortcutBinding {
     }
 }
 
-/// 划词语音问答的全局快捷键绑定。原生名字符串：
-/// - `primary`：主键（如 `";"`、`"."`、`"A"`、`"F1"`）。
-/// - `modifiers`：修饰键集合，元素来自 `{"cmd","ctrl","alt","shift","super"}`。
-///   小写名简单序列化即可，前端 / 后端解析时统一 lowercase。
-///
-/// 默认 `Cmd+Shift+;` (macOS) / `Ctrl+Shift+;` (Windows)。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct QaHotkeyBinding {
-    pub primary: String,
-    pub modifiers: Vec<String>,
-}
-
-impl Default for QaHotkeyBinding {
-    fn default() -> Self {
-        #[cfg(target_os = "macos")]
-        {
-            Self {
-                primary: ";".into(),
-                modifiers: vec!["cmd".into(), "shift".into()],
-            }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            Self {
-                primary: ";".into(),
-                modifiers: vec!["ctrl".into(), "shift".into()],
-            }
-        }
-    }
-}
-
-impl QaHotkeyBinding {
-    /// 渲染成给前端展示的可读标签。
-    /// 顺序与人类阅读习惯一致：`Cmd+Shift+;`、`Ctrl+Alt+Shift+.`。
-    pub fn display_label(&self) -> String {
-        let mut parts: Vec<String> = Vec::new();
-        // 固定输出顺序：Ctrl/Cmd → Alt/Option → Shift → Super
-        let modifier_order = ["cmd", "ctrl", "alt", "shift", "super"];
-        for tag in modifier_order {
-            if self.modifiers.iter().any(|m| m.eq_ignore_ascii_case(tag)) {
-                parts.push(modifier_display(tag).to_string());
-            }
-        }
-        let key_label = display_primary(&self.primary);
-        parts.push(key_label);
-        parts.join("+")
-    }
-}
-
-/// 录音快捷键的自定义组合键绑定。结构与 `QaHotkeyBinding` 相同：
+/// 录音快捷键的自定义组合键绑定。结构与 `ShortcutBinding` 相同：
 /// - `primary`：主键（如 `"D"`、`"Space"`、`"F1"`）。
 /// - `modifiers`：修饰键集合，元素来自 `{"cmd","ctrl","alt","shift","super"}`。
 ///
@@ -1760,13 +1617,13 @@ pub struct ComboBinding {
 }
 
 impl ComboBinding {
-    /// 渲染成给前端展示的可读标签。复用 QaHotkeyBinding 的格式化逻辑。
+    /// 渲染成给前端展示的可读标签。复用 ShortcutBinding 的格式化逻辑。
     pub fn display_label(&self) -> String {
-        let qa = QaHotkeyBinding {
+        let shortcut = ShortcutBinding {
             primary: self.primary.clone(),
             modifiers: self.modifiers.clone(),
         };
-        qa.display_label()
+        shortcut.display_label()
     }
 }
 
@@ -2198,9 +2055,6 @@ pub struct CapsulePayload {
     pub elapsed_ms: u64,
     pub message: Option<String>,
     pub inserted_chars: Option<u32>,
-    /// 当前 session 是否处于翻译模式（用户按过 Shift）。前端用它在胶囊顶部
-    /// 渲染"正在翻译"标签，让用户立刻知道这次输出会走翻译管线。详见 issue #4。
-    pub translation: bool,
 }
 
 /// Snapshot of credentials read from vault — only what the UI needs to know
@@ -2225,16 +2079,6 @@ pub struct TodayMetrics {
     pub segments_today: u64,
     pub avg_latency_ms: u64,
     pub total_duration_ms: u64,
-}
-
-/// 划词追问浮窗里一条对话消息。多轮提问会累积成 Vec<QaChatMessage>，
-/// 整段送给 LLM 维持上下文。详见 issue #118 v2。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct QaChatMessage {
-    /// "user" | "assistant" — 直接对应 OpenAI 消息 role 字段。
-    pub role: String,
-    pub content: String,
 }
 
 #[cfg(test)]
@@ -2378,6 +2222,43 @@ mod tests {
         assert!(!prefs.streaming_insert);
         assert!(prefs.streaming_insert_default_migrated);
         assert!(!prefs.streaming_insert_save_clipboard);
+    }
+
+    #[test]
+    fn deprecated_product_fields_are_read_but_not_written() {
+        let prefs: UserPreferences = serde_json::from_str(
+            r#"{
+                "translationTargetLanguage": "English",
+                "translationHotkey": { "primary": "Shift", "modifiers": [] },
+                "qaHotkey": { "primary": ";", "modifiers": ["ctrl", "shift"] },
+                "qaSaveHistory": true,
+                "autoUpdateCheck": true,
+                "marketplaceBaseUrl": "https://example.invalid",
+                "marketplaceDevLogin": "legacy-user",
+                "workingLanguages": ["简体中文"],
+                "defaultMode": "light"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(prefs.working_languages, vec!["简体中文".to_string()]);
+        assert_eq!(prefs.default_mode, PolishMode::Light);
+
+        let written = serde_json::to_value(&prefs).unwrap();
+        for key in [
+            "translationTargetLanguage",
+            "translationHotkey",
+            "qaHotkey",
+            "qaSaveHistory",
+            "autoUpdateCheck",
+            "marketplaceBaseUrl",
+            "marketplaceDevLogin",
+        ] {
+            assert!(
+                written.get(key).is_none(),
+                "deprecated field {key} should not be serialized"
+            );
+        }
     }
 
     #[test]

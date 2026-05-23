@@ -1,8 +1,7 @@
-// Modal — 居中弹窗：backdrop + 卡片。风格市场详情 / 上传 / 我的发布 / GitHub 登录
-// 等共用同一套弹出逻辑，避免每处各写一个。
+// Modal — centered backdrop + panel shell shared by local overlay UI.
 //
 // 动画沿用 global.css 的 ol-modal-backdrop-in / ol-modal-card-in（纯 opacity +
-// transform，不碰 blur），与设置弹窗、各市场弹窗保持一致。
+// transform，不碰 blur），与设置弹窗保持一致。
 
 import type { ReactNode } from 'react';
 

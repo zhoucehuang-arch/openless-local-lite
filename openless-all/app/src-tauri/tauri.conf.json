@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "OpenLess",
-  "version": "1.3.4-13",
-  "identifier": "com.openless.app",
+  "productName": "OpenLess Local",
+  "version": "1.0.0-local.0",
+  "identifier": "com.openless.local",
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
@@ -15,7 +15,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "OpenLess",
+        "title": "OpenLess Local",
         "width": 1240,
         "height": 800,
         "minWidth": 980,
@@ -33,29 +33,12 @@
       {
         "label": "capsule",
         "url": "index.html?window=capsule",
-        "title": "OpenLess Capsule",
+        "title": "OpenLess Local Capsule",
         "width": 220,
         "height": 110,
         "decorations": false,
         "transparent": true,
         "shadow": false,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "resizable": false,
-        "focus": false,
-        "visible": false,
-        "center": false,
-        "acceptFirstMouse": true
-      },
-      {
-        "label": "qa",
-        "url": "index.html?window=qa",
-        "title": "OpenLess QA",
-        "width": 380,
-        "height": 440,
-        "decorations": false,
-        "transparent": true,
-        "shadow": true,
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "resizable": false,
@@ -109,15 +92,6 @@
           "OpenLessImeDllX86Component"
         ]
       }
-    }
-  },
-  "plugins": {
-    "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFERUFBODAzNTY0QzMyM0YKUldRL01reFdBNmpxSGE1K0JadlpONXNWTzhJcGZCRGxjUVdIWExNNFJpeUNsSGZwazdlQThhemkK",
-      "endpoints": [
-        "https://fastgit.cc/https://github.com/appergb/openless/releases/latest/download/latest-{{target}}-{{arch}}-mirror.json",
-        "https://github.com/appergb/openless/releases/latest/download/latest-{{target}}-{{arch}}.json"
-      ]
     }
   }
 }

@@ -25,11 +25,7 @@ else
 fi
 
 echo "▶ tauri build"
-TAURI_BUILD_ARGS=(build)
-if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ] || [ -n "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]; then
-  TAURI_BUILD_ARGS+=(--config '{"bundle":{"createUpdaterArtifacts":true}}')
-fi
-npm run tauri -- "${TAURI_BUILD_ARGS[@]}"
+npm run tauri -- build
 
 echo "▶ 校验 Info.plist / 签名"
 /usr/libexec/PlistBuddy -c "Print :NSMicrophoneUsageDescription" "$INFO" >/dev/null
@@ -60,8 +56,8 @@ if [ "$INSTALL" = "1" ]; then
   sleep 1
   # 每次重装前重置 TCC：ad-hoc 签名 hash 每次构建都会变，旧授权立即失效，
   # 不重置就会出现"系统设置里看着已勾选实际不生效"。
-  tccutil reset Accessibility com.openless.app 2>/dev/null || true
-  tccutil reset Microphone com.openless.app 2>/dev/null || true
+  tccutil reset Accessibility com.openless.local 2>/dev/null || true
+  tccutil reset Microphone com.openless.local 2>/dev/null || true
   rm -rf /Applications/OpenLess.app
   cp -R "$APP" /Applications/
   xattr -dr com.apple.quarantine /Applications/OpenLess.app 2>/dev/null || true

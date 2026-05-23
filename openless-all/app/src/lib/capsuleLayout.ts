@@ -14,7 +14,6 @@ export interface CapsuleHostMetrics {
   height: number;
   horizontalInset: number;
   bottomInset: number;
-  badgeGap: number;
   boxSizing: 'border-box' | 'content-box';
 }
 
@@ -35,19 +34,15 @@ export function getCapsulePillMetrics(os: OS): CapsulePillMetrics {
 
 // macOS 走 1.2.11 calc 布局，不依赖 host metrics；Windows 端要更大的 host
 // 装下阴影 inset，仍用这一份。
-export function getCapsuleHostMetrics(
-  os: OS,
-  translationActive: boolean,
-): CapsuleHostMetrics {
+export function getCapsuleHostMetrics(os: OS): CapsuleHostMetrics {
   if (os === 'win') {
     const horizontalInset = 12;
     const pill = getCapsulePillMetrics(os);
     return {
       width: pill.width + horizontalInset * 2,
-      height: translationActive ? 118 : 84,
+      height: 84,
       horizontalInset,
       bottomInset: 12,
-      badgeGap: 8,
       boxSizing: 'border-box',
     };
   }
@@ -56,7 +51,6 @@ export function getCapsuleHostMetrics(
     height: 42,
     horizontalInset: 0,
     bottomInset: 0,
-    badgeGap: 8,
     boxSizing: 'border-box',
   };
 }

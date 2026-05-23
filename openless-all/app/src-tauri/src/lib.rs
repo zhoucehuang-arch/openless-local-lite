@@ -28,9 +28,7 @@ mod net;
 mod permissions;
 mod persistence;
 mod polish;
-mod qa_hotkey;
 mod recorder;
-mod selection;
 mod shortcut_binding;
 mod types;
 mod unicode_keystroke;
@@ -47,9 +45,6 @@ use std::time::Duration;
 
 const LOG_ROTATE_LIMIT_BYTES: u64 = 10 * 1024 * 1024;
 
-/// 第一次 show 时把 QA 浮窗摆到屏幕底部居中；之后的 show 不再 reposition，
-/// 让用户拖动后的位置在 hide → show 之间得以保持。详见 issue #118 v2。
-static QA_WINDOW_POSITIONED: AtomicBool = AtomicBool::new(false);
 static TRAY_MICROPHONE_WATCHER_STOPPING: AtomicBool = AtomicBool::new(false);
 use tauri::menu::{
     CheckMenuItemBuilder, Menu, MenuBuilder, MenuItemBuilder, Submenu, SubmenuBuilder,
@@ -109,8 +104,6 @@ pub fn run() {
             );
             show_main_window(app);
         }))
-        .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         // 跨平台开机自启：mac 写 LaunchAgent plist，linux 写 ~/.config/autostart/*.desktop，
         // windows 写 HKCU\Software\Microsoft\Windows\CurrentVersion\Run。前端 toggle 直接
@@ -133,25 +126,10 @@ pub fn run() {
             // Capsule 启动时定位到屏幕底部居中并隐藏；coordinator 按需显示。
             // 与 Swift `CapsuleWindowController.repositionToBottomCenter` 同语义。
             if let Some(capsule) = app.get_webview_window("capsule") {
-                if let Err(e) = position_capsule_bottom_center(&capsule, false) {
+                if let Err(e) = position_capsule_bottom_center(&capsule) {
                     log::warn!("[capsule] position failed: {e}");
                 }
                 let _ = capsule.hide();
-            }
-
-            // QA 浮窗（issue #118）：紧贴胶囊上方 8pt、屏幕底部居中、380×440。
-            // 启动时 hide()，等 coordinator 在 open_qa_panel 时再 show + 首次定位。
-            // tauri.conf.json 里需要声明 label="qa" 的窗口（前端 agent 负责）；
-            // 这里 get_webview_window 返回 None 时直接跳过，不影响主流程。
-            if let Some(qa) = app.get_webview_window("qa") {
-                if let Err(e) = position_qa_window(&qa) {
-                    log::warn!("[qa] position failed: {e}");
-                }
-                #[cfg(target_os = "macos")]
-                make_qa_window_draggable_macos(&qa);
-                let _ = qa.hide();
-            } else {
-                log::info!("[qa] qa 窗口未在 tauri.conf.json 中声明，前端 agent 会补上");
             }
 
             // 主窗口磨砂：macOS 用 NSVisualEffectView，Windows 用 Mica。
@@ -282,10 +260,6 @@ pub fn run() {
             commands::get_settings,
             commands::get_default_style_system_prompts,
             commands::set_settings,
-            commands::get_update_channel,
-            commands::set_update_channel,
-            commands::fetch_latest_beta_release,
-            commands::app_check_update_with_channel,
             commands::check_network,
             commands::get_hotkey_status,
             commands::get_hotkey_capability,
@@ -300,16 +274,6 @@ pub fn run() {
             commands::delete_history_entry,
             commands::clear_history,
             commands::read_audio_recording,
-            commands::marketplace_list,
-            commands::marketplace_detail,
-            commands::marketplace_install,
-            commands::marketplace_upload,
-            commands::marketplace_like,
-            commands::marketplace_my_likes,
-            commands::marketplace_my_packs,
-            commands::marketplace_delete,
-            commands::github_device_flow_start,
-            commands::github_device_flow_poll,
             commands::list_vocab,
             commands::add_vocab,
             commands::remove_vocab,
@@ -348,15 +312,10 @@ pub fn run() {
             commands::read_credential,
             commands::set_active_asr_provider,
             commands::set_active_llm_provider,
-            commands::get_qa_hotkey_label,
-            commands::set_qa_hotkey,
             commands::validate_shortcut_binding,
             commands::set_dictation_hotkey,
-            commands::set_translation_hotkey,
             commands::set_switch_style_hotkey,
             commands::set_open_app_hotkey,
-            commands::qa_window_dismiss,
-            commands::qa_window_pin,
             commands::validate_combo_hotkey,
             commands::set_combo_hotkey,
             commands::validate_provider_credentials,
@@ -416,11 +375,8 @@ pub fn run() {
         .run(|app, event| match event {
             RunEvent::Ready => {
                 let coordinator = app.state::<Arc<coordinator::Coordinator>>();
-                // 同步启动 QA hotkey listener。和 dictation hotkey 平行，互不抢状态。
-                coordinator.start_qa_hotkey_listener();
                 // 启动自定义组合键监听器。当 trigger == Custom 时替代 modifier-only 监听器。
                 coordinator.start_combo_hotkey_listener();
-                coordinator.start_translation_hotkey_listener();
                 coordinator.start_switch_style_hotkey_listener();
                 coordinator.start_open_app_hotkey_listener();
             }
@@ -438,9 +394,7 @@ pub fn run() {
                 TRAY_MICROPHONE_WATCHER_STOPPING.store(true, Ordering::Relaxed);
                 let coordinator = app.state::<Arc<coordinator::Coordinator>>();
                 coordinator.stop_hotkey_listener();
-                coordinator.stop_qa_hotkey_listener();
                 coordinator.stop_combo_hotkey_listener();
-                coordinator.stop_translation_hotkey_listener();
                 coordinator.stop_switch_style_hotkey_listener();
                 coordinator.stop_open_app_hotkey_listener();
             }
@@ -856,7 +810,6 @@ pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
 /// 异步动作（start_dictation / stop_dictation 是 async）通过 tauri 自带 runtime spawn，
 /// 不阻塞回调线程。所有动作都按 coordinator 当前状态自检：
 /// - ToggleDictation 在 Idle → start，在 Listening → stop，Starting/Processing/Inserting 忽略并记日志
-/// - ToggleQa 直接转发到 handle_qa_hotkey_pressed（语义等同于按一次 QA 热键）
 /// - CancelDictation 直接调 cancel（cancel 本身在非 Listening 时也安全）
 fn dispatch_cli_intent<R: Runtime>(app: &AppHandle<R>, intent: cli::CliIntent) {
     let coordinator = app
@@ -897,13 +850,6 @@ fn dispatch_cli_intent<R: Runtime>(app: &AppHandle<R>, intent: cli::CliIntent) {
                         log::info!("[cli] toggle-dictation ignored (phase={other:?})");
                     }
                 }
-            });
-        }
-        cli::CliIntent::ToggleQa => {
-            let coord = Arc::clone(&coordinator);
-            tauri::async_runtime::spawn(async move {
-                log::info!("[cli] toggle-qa: dispatching to qa hotkey handler");
-                coord.cli_toggle_qa_panel().await;
             });
         }
         cli::CliIntent::CancelDictation => {
@@ -1030,187 +976,16 @@ fn wait_for_app_activation<R: Runtime>(app: &AppHandle<R>) {
 #[cfg(not(target_os = "macos"))]
 fn wait_for_app_activation<R: Runtime>(_app: &AppHandle<R>) {}
 
-/// QA 浮窗的目标尺寸（issue #118）。胶囊默认 220×96 + Dock 80pt + 8pt gap，
-/// 算下来 QA 窗口顶部坐标 = h - 80 - 96 - 8 - 280。
-const QA_WINDOW_WIDTH: f64 = 380.0;
-const QA_WINDOW_HEIGHT: f64 = 440.0;
-/// 胶囊与 QA 窗口的间距，与设计稿一致。
-const QA_WINDOW_GAP_TO_CAPSULE: f64 = 8.0;
-/// 给 macOS Dock 留的下边距（与 capsule 同源）。
-const DOCK_BOTTOM_PADDING_FOR_QA: f64 = 80.0;
-
-/// 把 QA 浮窗放到屏幕底部居中、紧贴胶囊上方。tauri 启动期 + show 之前都会调一次，
-/// 防止用户切换显示器后位置错乱。
-fn position_qa_window<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) -> tauri::Result<()> {
-    let monitor = match window.current_monitor()? {
-        Some(m) => m,
-        None => return Ok(()),
-    };
-    let scale = monitor.scale_factor();
-    let size = monitor.size();
-    let logical_w = size.width as f64 / scale;
-    let logical_h = size.height as f64 / scale;
-    let capsule_height = capsule_height_for_qa();
-    let x = ((logical_w - QA_WINDOW_WIDTH) / 2.0).max(0.0);
-    let y = (logical_h
-        - DOCK_BOTTOM_PADDING_FOR_QA
-        - capsule_height
-        - QA_WINDOW_GAP_TO_CAPSULE
-        - QA_WINDOW_HEIGHT)
-        .max(0.0);
-    window.set_size(tauri::LogicalSize::new(QA_WINDOW_WIDTH, QA_WINDOW_HEIGHT))?;
-    window.set_position(LogicalPosition::new(x, y))?;
-    Ok(())
-}
-
-/// 显示 QA 窗口并发一条状态事件（前端订阅 `qa:state`）。
-/// `content_kind` 是不透明字符串（"loading" / "answer" / "idle" 等），
-/// 让前端 React 视图自行决定渲染哪一种。**不**抢前台 app 焦点（保证 Cmd+C
-/// fallback 仍能从原 app 拿到选区）。
-pub(crate) fn show_qa_window<R: tauri::Runtime>(app: &AppHandle<R>, content_kind: &str) {
-    let Some(window) = app.get_webview_window("qa") else {
-        log::info!("[qa] show 跳过：qa 窗口不存在 (content_kind={content_kind})");
-        return;
-    };
-    // 仅首次 show 时居中；之后保留用户拖动后的位置。
-    if !QA_WINDOW_POSITIONED.load(Ordering::Relaxed) {
-        if let Err(e) = position_qa_window(&window) {
-            log::warn!("[qa] position before first show failed: {e}");
-        }
-        QA_WINDOW_POSITIONED.store(true, Ordering::Relaxed);
-    }
-    // macOS：不用 window.show()（它会 makeKeyAndOrderFront 把 OpenLess 推成 frontmost，
-    // 之后 capture_selection 的 AX read / Cmd+C fallback 都跑在 OpenLess 自己的 webview 上
-    // → 抓不到原 app 选区）。改用 orderFrontRegardless 让窗口可见但**不**成为 key window，
-    // frontmost 仍是用户原 app，AX 还能读到选区。这是 Spotlight / Raycast 的标准做法。
-    //
-    // ⚠️ 关键：NSWindow 任何操作必须在主线程，macOS 26 是硬断言（违反直接 SIGTRAP）。
-    // show_qa_window 经常从 tokio worker 调（qa_hotkey_bridge_loop），所以裸 ObjC msg_send
-    // 必须用 `app.run_on_main_thread` dispatch 到主线程。详见 issue #118 v2。
-    #[cfg(target_os = "macos")]
-    {
-        let window_clone = window.clone();
-        let _ = app.run_on_main_thread(move || {
-            use objc2::msg_send;
-            use objc2::runtime::AnyObject;
-            match window_clone.ns_window() {
-                Ok(handle) => {
-                    let ns = handle as *mut AnyObject;
-                    if ns.is_null() {
-                        log::warn!("[qa] ns_window null; falling back to window.show()");
-                        let _ = window_clone.show();
-                    } else {
-                        unsafe {
-                            let _: () = msg_send![ns, orderFrontRegardless];
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::warn!("[qa] ns_window unavailable: {e}; falling back to window.show()");
-                    let _ = window_clone.show();
-                }
-            }
-        });
-    }
-    #[cfg(target_os = "windows")]
-    if !show_qa_window_no_activate(&window) {
-        log::warn!("[qa] show_no_activate failed; falling back to window.show()");
-        if let Err(e) = window.show() {
-            log::warn!("[qa] show fallback failed: {e}");
-        }
-    }
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    if let Err(e) = window.show() {
-        log::warn!("[qa] show failed: {e}");
-    }
-    let _ = app.emit_to(
-        "qa",
-        "qa:state",
-        serde_json::json!({ "kind": content_kind }),
-    );
-}
-
-/// QA 浮窗的拖动修复（macOS）。
-///
-/// 配置 `focus: false` 让 Tauri 把窗口创建为 nonactivating panel 风格（避免抢前台 app
-/// 焦点）。代价是 AppKit 的 `performWindowDragWithEvent:` 在 nonactivating 窗口上无效，
-/// 所以 `data-tauri-drag-region` 和 `WebviewWindow::start_dragging()` 都拖不动。
-///
-/// 解法是把 NSWindow 的 `movableByWindowBackground` 打开——这条路径不依赖窗口是否成为
-/// key window，跟 Spotlight / Raycast 的浮窗是同一手法。设一次就够，整个生命周期保持。
-#[cfg(target_os = "macos")]
-fn make_qa_window_draggable_macos<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
-    use objc2::msg_send;
-    use objc2::runtime::{AnyObject, Bool};
-    let Ok(handle) = window.ns_window() else {
-        log::warn!("[qa] ns_window unavailable; drag fix skipped");
-        return;
-    };
-    let ns_window = handle as *mut AnyObject;
-    if ns_window.is_null() {
-        log::warn!("[qa] ns_window null; drag fix skipped");
-        return;
-    }
-    unsafe {
-        let _: () = msg_send![ns_window, setMovableByWindowBackground: Bool::YES];
-        let _: () = msg_send![ns_window, setMovable: Bool::YES];
-    }
-    log::info!("[qa] NSWindow movableByWindowBackground=YES");
-}
-
-/// 隐藏 QA 窗口。供 commands::qa_window_dismiss / coordinator session 收尾共用。
-pub(crate) fn hide_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) {
-    if let Some(window) = app.get_webview_window("qa") {
-        let _ = window.hide();
-    }
-}
-
-/// 抓完选区后把焦点重新交回 QA 浮窗（Windows focus-dance 下半场）。begin_qa_session
-/// 在 capture_selection 跑完时调；非 Windows 平台是 no-op。issue #466。
-#[cfg(target_os = "windows")]
-pub(crate) fn refocus_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) {
-    if let Some(window) = app.get_webview_window("qa") {
-        let _ = show_qa_window_no_activate(&window);
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-pub(crate) fn refocus_qa_window<R: tauri::Runtime>(_app: &AppHandle<R>) {}
-
-#[cfg(target_os = "windows")]
-fn show_qa_window_no_activate<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) -> bool {
-    // 函数名沿用历史命名，实际行为已切到「show + focus」—— 让 QA webview 真正拿到键盘
-    // 焦点，ESC 才能到 React 监听、X 按钮 first-click 才不会被 OS 当作激活点击吃掉。
-    //
-    // 走 Tauri 的 show() / set_focus() 而不是 Win32 SetForegroundWindow + SetFocus
-    // 的原因（pr_agent 关注点二轮回应）：
-    //   - 直接 SetFocus(host_hwnd) 不保证 WebView2 child 收键盘事件，WebView2 子窗口
-    //     有自己的 focus 模型。Tauri 内部走 webview 专用路径，能把焦点真正送到 webview。
-    //   - SetForegroundWindow 在 Win11 focus-stealing prevention 下可能被拒。Tauri
-    //     2.x 在跨平台 abstraction 里做了兜底（按 SPI 临时调整 / attach input queue）。
-    //
-    // 对 issue #164 "QA 浮窗不抢前台 app 焦点"的取舍：浮窗出现时会短暂成为前台，
-    // 但 begin_qa_session 抓选区前 focus-dance 会把焦点临时还给用户原 app（见
-    // coordinator.rs 同 issue 注释），抓完再 refocus_qa_window 收回 —— 选区路径
-    // 仍能正常工作，issue #164 在「QA 出现的那一帧」短暂被违背是 #466 修复的代价。
-    if window.show().is_err() {
-        return false;
-    }
-    let _ = window.set_focus();
-    true
-}
-
 /// 把 capsule 窗口移到屏幕底部居中，与 Swift `CapsuleWindowController.repositionToBottomCenter` 同效。
 /// 留 80pt 给 macOS Dock；Windows 任务栏一般在底部 48pt 以内，整体也合适。
 pub(crate) fn position_capsule_bottom_center<R: tauri::Runtime>(
     window: &tauri::WebviewWindow<R>,
-    translation_active: bool,
 ) -> tauri::Result<()> {
     let monitor = match window.current_monitor()? {
         Some(m) => m,
         None => return Ok(()),
     };
-    let bounds = capsule_window_bounds(translation_active);
+    let bounds = capsule_window_bounds();
     window.set_size(LogicalSize::new(bounds.width, bounds.height))?;
 
     let scale = monitor.scale_factor();
@@ -1218,7 +993,7 @@ pub(crate) fn position_capsule_bottom_center<R: tauri::Runtime>(
     let logical_w = size.width as f64 / scale;
     let logical_h = size.height as f64 / scale;
     let x = ((logical_w - bounds.width) / 2.0).max(0.0);
-    let y = (logical_h - capsule_visual_height(translation_active) - 80.0 - bounds.bottom_inset)
+    let y = (logical_h - capsule_visual_height() - 80.0 - bounds.bottom_inset)
         .max(0.0);
     window.set_position(LogicalPosition::new(x, y))?;
     Ok(())
@@ -1231,7 +1006,7 @@ struct CapsuleWindowBounds {
     bottom_inset: f64,
 }
 
-fn capsule_window_bounds(translation_active: bool) -> CapsuleWindowBounds {
+fn capsule_window_bounds() -> CapsuleWindowBounds {
     #[cfg(target_os = "windows")]
     {
         const WINDOWS_CAPSULE_PILL_WIDTH: f64 = 196.0;
@@ -1240,16 +1015,13 @@ fn capsule_window_bounds(translation_active: bool) -> CapsuleWindowBounds {
             // Keep the existing Windows hitbox width, but express it as
             // pill width (196) + symmetric 12px side insets for shadow room.
             width: WINDOWS_CAPSULE_PILL_WIDTH + WINDOWS_CAPSULE_SIDE_INSET * 2.0,
-            height: if translation_active { 118.0 } else { 84.0 },
+            height: 84.0,
             bottom_inset: 12.0,
         }
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        // macOS / Linux：固定 220×110，与 1.2.11 行为一致 — 录音 / 翻译徽章
-        // 共用同一个窗口尺寸，避免按 Shift 后窗口高度变化导致胶囊整体下移。
-        let _ = translation_active;
         CapsuleWindowBounds {
             width: 220.0,
             height: 110.0,
@@ -1258,7 +1030,7 @@ fn capsule_window_bounds(translation_active: bool) -> CapsuleWindowBounds {
     }
 }
 
-fn capsule_visual_height(_translation_active: bool) -> f64 {
+fn capsule_visual_height() -> f64 {
     #[cfg(target_os = "windows")]
     {
         52.0
@@ -1270,16 +1042,12 @@ fn capsule_visual_height(_translation_active: bool) -> f64 {
     }
 }
 
-fn capsule_height_for_qa() -> f64 {
-    capsule_visual_height(false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        capsule_height_for_qa, capsule_visual_height, capsule_window_bounds,
-        parse_tray_polish_mode_id, rotate_log_if_too_large, tray_polish_mode_menu_entries,
-        tray_style_menu_enabled, LOG_ROTATE_LIMIT_BYTES,
+        capsule_visual_height, capsule_window_bounds, parse_tray_polish_mode_id,
+        rotate_log_if_too_large, tray_polish_mode_menu_entries, tray_style_menu_enabled,
+        LOG_ROTATE_LIMIT_BYTES,
     };
     use crate::types::PolishMode;
     use std::io::Write;
@@ -1335,7 +1103,7 @@ mod tests {
 
     #[test]
     fn capsule_window_bounds_leave_room_for_windows_shadow() {
-        let bounds = capsule_window_bounds(false);
+        let bounds = capsule_window_bounds();
         #[cfg(target_os = "windows")]
         assert_eq!(
             (bounds.width, bounds.height, bounds.bottom_inset),
@@ -1350,37 +1118,12 @@ mod tests {
     }
 
     #[test]
-    fn capsule_window_bounds_expand_for_translation_badge() {
-        let bounds = capsule_window_bounds(true);
-        #[cfg(target_os = "windows")]
-        assert_eq!(
-            (bounds.width, bounds.height, bounds.bottom_inset),
-            (220.0, 118.0, 12.0)
-        );
-
-        #[cfg(not(target_os = "windows"))]
-        assert_eq!(
-            (bounds.width, bounds.height, bounds.bottom_inset),
-            (220.0, 110.0, 0.0)
-        );
-    }
-
-    #[test]
     fn capsule_visual_height_matches_frontend_pill() {
         #[cfg(target_os = "windows")]
-        assert_eq!(capsule_visual_height(true), 52.0);
+        assert_eq!(capsule_visual_height(), 52.0);
 
         #[cfg(not(target_os = "windows"))]
-        assert_eq!(capsule_visual_height(true), 96.0);
-    }
-
-    #[test]
-    fn qa_anchor_uses_normal_capsule_height_source() {
-        #[cfg(target_os = "windows")]
-        assert_eq!(capsule_height_for_qa(), 52.0);
-
-        #[cfg(not(target_os = "windows"))]
-        assert_eq!(capsule_height_for_qa(), 96.0);
+        assert_eq!(capsule_visual_height(), 96.0);
     }
 
     #[test]

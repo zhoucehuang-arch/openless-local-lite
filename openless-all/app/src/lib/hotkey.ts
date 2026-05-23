@@ -1,12 +1,5 @@
 import i18n from '../i18n';
-import type { ComboBinding, HotkeyBinding, HotkeyTrigger, QaHotkeyBinding, ShortcutBinding } from './types';
-
-export function defaultQaShortcut(): ShortcutBinding {
-  return {
-    primary: ';',
-    modifiers: defaultAppShortcutModifiers(),
-  };
-}
+import type { ComboBinding, HotkeyBinding, HotkeyTrigger, ShortcutBinding } from './types';
 
 export function defaultAppShortcutModifiers(): string[] {
   return currentPlatform().isMac ? ['cmd', 'shift'] : ['ctrl', 'shift'];
@@ -174,8 +167,8 @@ function legacyTriggerCode(trigger: HotkeyTrigger | null | undefined): string | 
   }
 }
 
-/** 把 ComboBinding 或 QaHotkeyBinding 格式化为可读标签，如 "⌘⇧D" / "Ctrl+Shift+D"。 */
-export function formatComboLabel(binding: ComboBinding | QaHotkeyBinding | ShortcutBinding): string {
+/** 把 ComboBinding 或 ShortcutBinding 格式化为可读标签，如 "⌘⇧D" / "Ctrl+Shift+D"。 */
+export function formatComboLabel(binding: ComboBinding | ShortcutBinding): string {
   const parts: string[] = [];
   const platform = currentPlatform();
 

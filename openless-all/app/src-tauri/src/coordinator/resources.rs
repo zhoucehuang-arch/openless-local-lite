@@ -148,7 +148,7 @@ pub(super) async fn acquire_recording_mute(inner: &Arc<Inner>, owner: &'static s
     // holders/guard 状态本身在 panic 路径下仍然一致 —— 因为 panic 只能发生在
     // activate() 抛 / lock 抛，前者会让 holders 不增 + guard 仍 None，后者根本
     // 进不到 mutate 阶段；但用户碰到 system audio 在录音时漏出系统声却找不到
-    // 任何 [audio-mute] 日志，没法 debug。pr_agent feedback on PR #391。
+    // 任何 [audio-mute] 日志，没法 debug。
     if let Err(join_err) = join_result {
         log::error!(
             "[audio-mute] acquire task panicked for {owner}: {join_err}; mute did not activate"
@@ -187,13 +187,6 @@ pub(super) fn release_recording_mute(inner: &Arc<Inner>, owner: &'static str) {
         handle.spawn_blocking(work);
     } else {
         work();
-    }
-}
-
-pub(super) fn stop_qa_recorder(inner: &Arc<Inner>) {
-    if let Some(rec) = inner.qa_recorder.lock().take() {
-        rec.stop();
-        release_recording_mute(inner, "qa");
     }
 }
 

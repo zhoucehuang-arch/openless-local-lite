@@ -2,7 +2,7 @@
 // Sidebar lives INSIDE the console card.
 // Settings opens as a centered modal sheet from the sidebar bottom entry.
 //
-// Ported verbatim from design_handoff_openless/variants.jsx::FloatingShell.
+// Local app shell for the current Tauri frontend.
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -13,12 +13,10 @@ import { Overview } from '../pages/Overview';
 import { History } from '../pages/History';
 import { Vocab } from '../pages/Vocab';
 import { Style } from '../pages/Style';
-import { Translation } from '../pages/Translation';
-import { SelectionAsk } from '../pages/SelectionAsk';
 // 风格市场不再作为独立 nav tab —— 已整合为 Style 页面内 modal（入口在「风格包」标题右侧）。
 // LocalAsr 不再作为主 nav tab——本地 ASR 模型管理已合并到 Settings → Advanced 中
 // 通过 <LocalAsr embedded /> 渲染。这里之前的 import 与 NAV_BASE 条目都已移除。
-import { APP_VERSION_LABEL, IS_BETA_BUILD } from '../lib/appVersion';
+import { APP_VERSION_LABEL } from '../lib/appVersion';
 import {
   HOTKEY_MODE_MIGRATION_ACK_KEY,
   HOTKEY_MODE_MIGRATION_DEFERRED_KEY,
@@ -45,8 +43,6 @@ const NAV_BASE: Array<Omit<NavItem, 'name'>> = [
   { id: 'history', icon: 'history', cmp: History },
   { id: 'vocab', icon: 'vocab', cmp: Vocab },
   { id: 'style', icon: 'style', cmp: Style },
-  { id: 'translation', icon: 'translate', cmp: Translation },
-  { id: 'selectionAsk', icon: 'selectionAsk', cmp: SelectionAsk },
 ];
 
 interface FloatingShellProps {
@@ -58,7 +54,7 @@ interface FloatingShellProps {
 export function FloatingShell({ os: osProp, initialTab = 'overview', initialSettings = false }: FloatingShellProps) {
   const os = osProp ?? detectOS();
   return (
-    <WindowChrome os={os} title="OpenLess" height="100%">
+    <WindowChrome os={os} title="OpenLess Local" height="100%">
       <FloatingShellBody os={os} initialTab={initialTab} initialSettings={initialSettings} />
     </WindowChrome>
   );
@@ -207,10 +203,10 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
           <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '2px 8px 12px' }}>
             <img
               src="AppIcon.png"
-              alt="OpenLess"
+              alt="OpenLess Local"
               style={{ width: 22, height: 22, borderRadius: 5, boxShadow: '0 1px 2px rgba(0,0,0,.1), 0 0 0 0.5px rgba(0,0,0,.06)' }} />
 
-            <div style={{ fontSize: 13.5, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--ol-ink)' }}>OpenLess</div>
+            <div style={{ fontSize: 13.5, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--ol-ink)' }}>OpenLess Local</div>
           </div>
 
           {/* nav — 滑动指示器：active pill 是 absolute 元素，currentTab 改变时 top/height
@@ -265,7 +261,7 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
 
           <div style={{ flex: 1 }} />
 
-          {/* 底部两行：上行 = 版本 chip（含 BETA 标），下行 = 设置按钮。
+          {/* 底部两行：上行 = 版本 chip，下行 = 设置按钮。
               单行布局在窄 sidebar 下会把「设置」挤成两行竖字 + 版本糊一起；
               翻回两行同时把顺序反过来：设置真正落到最底，版本在它上面。 */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingTop: 10 }}>
@@ -281,20 +277,6 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
                 color: 'var(--ol-ink-4)',
               }}
             >
-              {IS_BETA_BUILD && (
-                <span style={{
-                  display: 'inline-block',
-                  padding: '2px 8px',
-                  fontSize: 10,
-                  fontWeight: 600,
-                  letterSpacing: '0.04em',
-                  textTransform: 'uppercase',
-                  color: 'var(--ol-blue)',
-                  background: 'rgba(37,99,235,0.10)',
-                  borderRadius: 999,
-                }}>{t('shell.betaTag')}</span>
-              )}
-
               <span>{t('shell.footer.version', { version: APP_VERSION_LABEL })}</span>
             </div>
 

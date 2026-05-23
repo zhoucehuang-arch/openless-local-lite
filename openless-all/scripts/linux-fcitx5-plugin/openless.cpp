@@ -14,12 +14,8 @@
  *    SetHotkey(as: keys)           — 设置听写触发快捷键 (Key::parse 格式)
  *    SetHotkeyRaw(uu: sym, states) — 直接设听写触发 sym+states (不走 parse)
  *    SetCustomDictationTrigger(s: keyString) — 设置自定义组合键 (Key::parse 格式)
- *    SetQaHotkeyRaw(uu: sym, states)     — 直接设 QA 面板触发 sym+states
- *    SetTranslationHotkeyRaw(uu: sym, states) — 直接设翻译模式触发 sym+states
  *  信号:
  *    DictationKeyEvent(uub: sym, states, isPress) — 听写热键按下/抬起
- *    QaShortcutEvent(uub: sym, states, isPress)   — QA 快捷键按下/抬起
- *    TranslationModifierEvent(uub: sym, states, isPress) — 翻译修饰键按下/抬起
  */
 
 #include <memory>
@@ -63,10 +59,6 @@ public:
         : instance_(instance),
           triggerRawSym_(0),
           triggerRawStates_(0),
-          qaRawSym_(0),
-          qaRawStates_(0),
-          translationRawSym_(0),
-          translationRawStates_(0),
           hasCustomDictationKey_(false),
           savedIc_(nullptr) {
 
@@ -149,40 +141,6 @@ public:
                             << " states=" << dstates
                             << " isPress=" << isPress;
                         dictationKeyEvent(dsym, dstates, isPress);
-                        keyEvent.filterAndAccept();
-                        return;
-                    }
-
-                    // 检查 QA 快捷键
-                    if (qaRawSym_ != 0 &&
-                        sym == qaRawSym_ &&
-                        states == qaRawStates_) {
-                        FCITX_LOGC(openless, Debug)
-                            << "QA shortcut: sym=" << qaRawSym_
-                            << " states=" << qaRawStates_
-                            << " isPress=" << isPress;
-                        qaShortcutEvent(qaRawSym_, qaRawStates_, isPress);
-                        keyEvent.filterAndAccept();
-                        return;
-                    }
-
-                    // 检查翻译模式修饰键（自定义 + 内置 Shift）
-                    bool translationMatched = false;
-                    if (translationRawSym_ != 0 &&
-                        sym == translationRawSym_ &&
-                        states == translationRawStates_) {
-                        translationMatched = true;
-                    }
-                    // 内置 Shift 修饰键
-                    if (sym == 0xffe1 || sym == 0xffe2) {
-                        translationMatched = true;
-                    }
-                    if (translationMatched) {
-                        FCITX_LOGC(openless, Debug)
-                            << "Translation modifier: sym=" << sym
-                            << " states=" << states
-                            << " isPress=" << isPress;
-                        translationModifierEvent(sym, states, isPress);
                         keyEvent.filterAndAccept();
                         return;
                     }
@@ -314,45 +272,17 @@ public:
             << " states=" << static_cast<uint32_t>(key.states());
     }
 
-    void setQaHotkeyRaw(uint32_t sym, uint32_t states) {
-        qaRawSym_ = sym;
-        qaRawStates_ = states;
-        RawConfig raw;
-        readAsIni(raw, configFile());
-        raw.setValueByPath("QaRawSym", std::to_string(sym));
-        raw.setValueByPath("QaRawStates", std::to_string(states));
-        safeSaveAsIni(raw, configFile());
-        FCITX_LOGC(openless, Info)
-            << "SetQaHotkeyRaw: sym=" << sym << " states=" << states;
-    }
-
-    void setTranslationHotkeyRaw(uint32_t sym, uint32_t states) {
-        translationRawSym_ = sym;
-        translationRawStates_ = states;
-        RawConfig raw;
-        readAsIni(raw, configFile());
-        raw.setValueByPath("TranslationRawSym", std::to_string(sym));
-        raw.setValueByPath("TranslationRawStates", std::to_string(states));
-        safeSaveAsIni(raw, configFile());
-        FCITX_LOGC(openless, Info)
-            << "SetTranslationHotkeyRaw: sym=" << sym << " states=" << states;
-    }
-
     FCITX_OBJECT_VTABLE_METHOD(commitText, "CommitText", "s", "");
     FCITX_OBJECT_VTABLE_METHOD(setHotkey, "SetHotkey", "as", "");
     FCITX_OBJECT_VTABLE_METHOD(setHotkeyRaw, "SetHotkeyRaw", "uu", "");
     FCITX_OBJECT_VTABLE_METHOD(setCustomDictationTrigger, "SetCustomDictationTrigger", "s", "");
-    FCITX_OBJECT_VTABLE_METHOD(setQaHotkeyRaw, "SetQaHotkeyRaw", "uu", "");
-    FCITX_OBJECT_VTABLE_METHOD(setTranslationHotkeyRaw, "SetTranslationHotkeyRaw", "uu", "");
     FCITX_OBJECT_VTABLE_SIGNAL(dictationKeyEvent, "DictationKeyEvent", "uub");
-    FCITX_OBJECT_VTABLE_SIGNAL(qaShortcutEvent, "QaShortcutEvent", "uub");
-    FCITX_OBJECT_VTABLE_SIGNAL(translationModifierEvent, "TranslationModifierEvent", "uub");
 
     Instance *instance() { return instance_; }
 
     void reloadConfig() override {
         readAsIni(config_, configFile());
-        // 加载原始 sym/states（由 SetHotkeyRaw / SetQaHotkeyRaw / SetTranslationHotkeyRaw 写入的持久化键值）
+        // 加载原始 sym/states（由 SetHotkeyRaw 写入的持久化键值）
         RawConfig raw;
         readAsIni(raw, configFile());
         {
@@ -362,22 +292,6 @@ public:
         {
             auto *v = raw.valueByPath("TriggerRawStates");
             triggerRawStates_ = v ? std::stoul(*v, nullptr, 0) : 0;
-        }
-        {
-            auto *v = raw.valueByPath("QaRawSym");
-            qaRawSym_ = v ? std::stoul(*v, nullptr, 0) : 0;
-        }
-        {
-            auto *v = raw.valueByPath("QaRawStates");
-            qaRawStates_ = v ? std::stoul(*v, nullptr, 0) : 0;
-        }
-        {
-            auto *v = raw.valueByPath("TranslationRawSym");
-            translationRawSym_ = v ? std::stoul(*v, nullptr, 0) : 0;
-        }
-        {
-            auto *v = raw.valueByPath("TranslationRawStates");
-            translationRawStates_ = v ? std::stoul(*v, nullptr, 0) : 0;
         }
         rebuildTriggerKeys();
     }
@@ -406,10 +320,6 @@ private:
     KeyList triggerKeyList_;
     uint32_t triggerRawSym_;
     uint32_t triggerRawStates_;
-    uint32_t qaRawSym_;
-    uint32_t qaRawStates_;
-    uint32_t translationRawSym_;
-    uint32_t translationRawStates_;
     Key customDictationKey_;
     bool hasCustomDictationKey_;
     /// 快捷键按下时保存的输入上下文指针，用于 commitText 在失焦后仍能提交文字。

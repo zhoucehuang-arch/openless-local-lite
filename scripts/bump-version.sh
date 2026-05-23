@@ -1,29 +1,29 @@
 #!/usr/bin/env bash
-# 同步更新 OpenLess 四处版本号。
+# 同步更新 OpenLess Local 版本号。
 # 用法：
-#     ./scripts/bump-version.sh 1.2.21
+#     ./scripts/bump-version.sh 1.0.1-local.0
 #
-# 改的位置（CLAUDE.md 强调必须同时改，否则 release-tauri.yml 失败）：
-#   - openless-all/app/package.json                "version": "X.Y.Z"
+# 改的位置：
+#   - openless-all/app/package.json                "version": "X.Y.Z[-suffix]"
 #   - openless-all/app/package-lock.json           根包 version + 嵌套引用
-#   - openless-all/app/src-tauri/tauri.conf.json   "version": "X.Y.Z"
-#   - openless-all/app/src-tauri/Cargo.toml        version = "X.Y.Z" (顶层)
-#   - openless-all/app/src-tauri/Cargo.lock        通过 cargo update -p openless 同步
+#   - openless-all/app/src-tauri/tauri.conf.json   "version": "X.Y.Z[-suffix]"
+#   - openless-all/app/src-tauri/Cargo.toml        version = "X.Y.Z[-suffix]" (顶层)
+#   - openless-all/app/src-tauri/Cargo.lock        通过 cargo update -p openless-local 同步
 #
-# CI 的 cross-platform 任务最后一步会校验四个文件版本号一致；漏改一处直接 fail。
+# 本脚本只服务本地 fork 的版本一致性，不创建 tag 或发布渠道。
 
 set -euo pipefail
 
 if [ "${1:-}" = "" ]; then
   echo "用法: $0 <new-version>" >&2
-  echo "例:   $0 1.2.21" >&2
+  echo "例:   $0 1.0.1-local.0" >&2
   exit 1
 fi
 
 NEW="$1"
 
-if ! [[ "$NEW" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "错误：版本号必须是 X.Y.Z 数字格式 (拿到 '$NEW')" >&2
+if ! [[ "$NEW" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+  echo "错误：版本号必须是 X.Y.Z 或 X.Y.Z-suffix 格式 (拿到 '$NEW')" >&2
   exit 1
 fi
 
@@ -51,7 +51,7 @@ echo "▶ 升 package.json + package-lock.json → $NEW"
 # tauri.conf.json：BSD sed 与 GNU sed 都支持 -E + -i.bak 后缀；不用行号范围地址。
 echo "▶ 升 tauri.conf.json → $NEW"
 sed -E -i.bak \
-  "s/\"version\":[[:space:]]*\"[0-9]+\.[0-9]+\.[0-9]+\"/\"version\": \"$NEW\"/" \
+  "s/\"version\":[[:space:]]*\"[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?\"/\"version\": \"$NEW\"/" \
   "$TAURI_CONF"
 rm "$TAURI_CONF.bak"
 
@@ -59,17 +59,17 @@ rm "$TAURI_CONF.bak"
 # 不用 GNU sed 的 `0,/.../` 行号范围地址（macOS BSD sed 不支持）。
 echo "▶ 升 Cargo.toml → $NEW"
 awk -v new="$NEW" '
-  !done && /^version = "[0-9]+\.[0-9]+\.[0-9]+"$/ {
-    sub(/"[0-9]+\.[0-9]+\.[0-9]+"/, "\"" new "\"")
+  !done && /^version = "[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?"$/ {
+    sub(/"[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?"/, "\"" new "\"")
     done = 1
   }
   { print }
 ' "$CARGO_TOML" > "$CARGO_TOML.tmp"
 mv "$CARGO_TOML.tmp" "$CARGO_TOML"
 
-# Cargo.lock：cargo update 显式同步 openless package；失败要立刻退出，不能吞错。
+# Cargo.lock：cargo update 显式同步 openless-local package；失败要立刻退出，不能吞错。
 echo "▶ 同步 Cargo.lock"
-( cd "$APP/src-tauri" && cargo update -p openless 2>&1 | tail -5 )
+( cd "$APP/src-tauri" && cargo update -p openless-local 2>&1 | tail -5 )
 
 # 校验五处一致（package.json / package-lock.json / tauri.conf.json / Cargo.toml / Cargo.lock）
 echo
@@ -79,15 +79,15 @@ LOCK_ROOT=$(node -p "require('$PKG_LOCK').version")
 LOCK_NESTED=$(node -p "require('$PKG_LOCK').packages[''].version")
 TAU=$(node -p "require('$TAURI_CONF').version")
 CRG=$(grep -E '^version = ' "$CARGO_TOML" | head -1 | sed -E 's/^version = "(.+)"$/\1/')
-CARGO_LOCK_VER=$(awk '/^name = "openless"$/{getline; if (match($0, /version = "([0-9.]+)"/, a)) {print a[1]; exit}}' "$CARGO_LOCK" 2>/dev/null \
-  || awk 'BEGIN{found=0} /^name = "openless"$/{found=1; next} found && /^version = /{gsub(/"/,""); print $3; exit}' "$CARGO_LOCK")
+CARGO_LOCK_VER=$(awk '/^name = "openless-local"$/{getline; if (match($0, /version = "([0-9A-Za-z.-]+)"/, a)) {print a[1]; exit}}' "$CARGO_LOCK" 2>/dev/null \
+  || awk 'BEGIN{found=0} /^name = "openless-local"$/{found=1; next} found && /^version = /{gsub(/"/,""); print $3; exit}' "$CARGO_LOCK")
 
 printf '%-22s %s\n' 'package.json:'        "$PKG"
 printf '%-22s %s\n' 'package-lock root:'   "$LOCK_ROOT"
 printf '%-22s %s\n' 'package-lock nested:' "$LOCK_NESTED"
 printf '%-22s %s\n' 'tauri.conf.json:'     "$TAU"
 printf '%-22s %s\n' 'Cargo.toml:'          "$CRG"
-printf '%-22s %s\n' 'Cargo.lock (openless):' "$CARGO_LOCK_VER"
+printf '%-22s %s\n' 'Cargo.lock (openless-local):' "$CARGO_LOCK_VER"
 
 mismatch=0
 for v in "$LOCK_ROOT" "$LOCK_NESTED" "$TAU" "$CRG" "$CARGO_LOCK_VER"; do
@@ -105,6 +105,4 @@ echo "✓ 全部一致：$NEW"
 echo
 echo "下一步建议："
 echo "  git add $PKG_JSON $PKG_LOCK $TAURI_CONF $CARGO_TOML $CARGO_LOCK"
-echo "  git commit -m 'chore(release): $NEW'"
-echo "  git push"
-echo "  git tag v$NEW-tauri && git push origin v$NEW-tauri"
+echo "  git commit -m 'chore: bump local version to $NEW'"

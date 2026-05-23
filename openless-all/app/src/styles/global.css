@@ -79,7 +79,7 @@ a { color: inherit; text-decoration: none; }
 
 /* 弹窗动画统一入口 —— 纯 opacity / transform，合成器友好。
    背景不再逐帧动画 backdrop-filter（会卡顿、闪烁）；模糊由宿主元素静态设定，
-   动画只负责淡入淡出。设置弹窗 / 各市场弹窗 / GitHub 登录弹窗共用这套。 */
+   动画只负责淡入淡出。设置弹窗和本地 overlay 共用这套。 */
 @keyframes ol-modal-backdrop-in {
   from { opacity: 0; }
   to   { opacity: 1; }

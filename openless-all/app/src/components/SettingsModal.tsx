@@ -12,7 +12,6 @@ import { useTranslation } from 'react-i18next';
 import { Icon } from './Icon';
 import { SavedToast } from './SavedToast';
 import { useSavedToastListener } from '../lib/savedEvent';
-import { openExternal } from '../lib/ipc';
 import type { OS } from './WindowChrome';
 import { GeneralTab, ServicesTab, PrivacyTab, AdvancedTab } from '../pages/settings/tabs';
 import { AboutSection } from '../pages/settings/AboutSection';
@@ -34,12 +33,8 @@ interface SettingsModalProps {
 interface ModalNavItem {
   id: string;
   icon: string;
-  external?: boolean;
-  href?: string;
 }
 
-const HELP_URL = 'https://github.com/appergb/openless#readme';
-const RELEASE_NOTES_URL = 'https://github.com/appergb/openless/releases';
 
 // 第一组：可选中的 tab；第二组：外部链接（永远不 active）。
 const TAB_ITEMS: ModalNavItem[] = [
@@ -48,10 +43,6 @@ const TAB_ITEMS: ModalNavItem[] = [
   { id: 'privacy', icon: 'shield' },
   { id: 'advanced', icon: 'bolt' },
   { id: 'about', icon: 'info' },
-];
-const LINK_ITEMS: ModalNavItem[] = [
-  { id: 'helpCenter', icon: 'help', external: true, href: HELP_URL },
-  { id: 'releaseNotes', icon: 'doc', external: true, href: RELEASE_NOTES_URL },
 ];
 
 export function SettingsModal({ os: _os, onClose, initialSettingsSection }: SettingsModalProps) {
@@ -140,21 +131,6 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
                 </button>
               );
             })}
-          </div>
-
-          {/* 外链组 */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 1, paddingTop: 8, borderTop: '0.5px solid var(--ol-line-soft)' }}>
-            {LINK_ITEMS.map(it => (
-              <button
-                key={it.id}
-                onClick={() => { if (it.href) void openExternal(it.href); }}
-                className="ol-nav-btn"
-                style={navBtnStyle}>
-                <Icon name={it.icon} size={14} />
-                <span style={{ flex: 1 }}>{t(`modal.sections.${it.id}`)}</span>
-                <Icon name="external" size={11} />
-              </button>
-            ))}
           </div>
         </aside>
 

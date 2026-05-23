@@ -748,7 +748,7 @@ fn load_credentials() -> CredsRoot {
             // （用户尚未在第一次弹窗里点同意 / DataProtection 错误 / login keychain
             // 还没 unlock）；如果在这里把 legacy fallback 写进 cache，等用户授权后
             // 我们就再也不会重读 keyring，整个进程生命周期里都拿 stale 数据。下次
-            // 调用让它再尝试一次 keyring。pr_agent feedback on PR #394。
+            // 调用让它再尝试一次 keyring。
             log::warn!("[vault] system credential read failed: {e}");
             load_legacy_sources_without_migration()
         }
@@ -1070,7 +1070,7 @@ struct StylePackArchiveManifest {
     icon_file: Option<String>,
     recommended_model: Option<String>,
     compatible_app_version: Option<String>,
-    /// Marketplace 上游关系。旧 ZIP 没有此字段时自动为 None；
+    /// 风格包来源关系。旧 ZIP 没有此字段时自动为 None；
     /// 兼容早期口误/拼写包里可能出现的 `orion*` 字段名。
     #[serde(default, alias = "orionPackId", alias = "orion_pack_id", alias = "origin_pack_id")]
     origin_pack_id: Option<String>,
@@ -1231,7 +1231,7 @@ impl StylePackStore {
         Ok(updated)
     }
 
-    /// 设置衍生关系；marketplace_install 安装本地包后绑定 upstream id + author。
+    /// 设置衍生关系；导入本地包后绑定 upstream id + author。
     /// 单独走这里是为了不让前端通用 save 路径误清这两字段。
     pub fn set_origin(
         &self,
@@ -1720,7 +1720,7 @@ fn merge_style_pack_update(existing: StylePack, incoming: StylePack) -> Result<S
     updated.tags = normalize_tags(&incoming.tags);
     updated.recommended_model = normalize_optional_text(incoming.recommended_model);
     updated.compatible_app_version = normalize_optional_text(incoming.compatible_app_version);
-    // origin 字段是 marketplace_install 之后的「衍生关系绑定」，**不能**走通用 save 路径覆盖
+    // origin 字段是本地导入之后的「衍生关系绑定」，**不能**走通用 save 路径覆盖
     // ——否则前端 save 时丢失 originPackId 就会清掉关联。要写 origin 走专用的 set_origin。
     updated.updated_at = Some(Utc::now().to_rfc3339());
     Ok(updated)

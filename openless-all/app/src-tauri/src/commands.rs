@@ -37,8 +37,8 @@ use crate::types::{
     builtin_style_pack_id, default_active_style_pack_id, ChineseScriptPreference, ComboBinding,
     CorrectionRule, CredentialsStatus, DictationSession, DictionaryEntry, HotkeyCapability,
     HotkeyStatus, OutputLanguagePreference, PolishMode, ShortcutBinding, StylePack, StylePackKind,
-    StylePackRuntimeDiagnostics, StyleSystemPrompts, UpdateChannel, UserPreferences,
-    VocabPresetStore, WindowsImeStatus,
+    StylePackRuntimeDiagnostics, StyleSystemPrompts, UserPreferences, VocabPresetStore,
+    WindowsImeStatus,
 };
 
 type CoordinatorState<'a> = State<'a, Arc<Coordinator>>;
@@ -79,9 +79,7 @@ trait SettingsWriter {
     fn read_settings(&self) -> UserPreferences;
     fn write_settings(&self, prefs: UserPreferences) -> Result<(), String>;
     fn refresh_dictation_hotkey(&self);
-    fn refresh_qa_hotkey(&self);
     fn refresh_combo_hotkey(&self);
-    fn refresh_translation_hotkey(&self);
     fn refresh_switch_style_hotkey(&self);
     fn refresh_open_app_hotkey(&self);
 }
@@ -99,16 +97,8 @@ impl SettingsWriter for Coordinator {
         self.update_hotkey_binding();
     }
 
-    fn refresh_qa_hotkey(&self) {
-        self.update_qa_hotkey_binding();
-    }
-
     fn refresh_combo_hotkey(&self) {
         self.update_combo_hotkey_binding();
-    }
-
-    fn refresh_translation_hotkey(&self) {
-        self.update_translation_hotkey_binding();
     }
 
     fn refresh_switch_style_hotkey(&self) {
@@ -133,16 +123,8 @@ impl<T: SettingsWriter + ?Sized> SettingsWriter for Arc<T> {
         (**self).refresh_dictation_hotkey();
     }
 
-    fn refresh_qa_hotkey(&self) {
-        (**self).refresh_qa_hotkey();
-    }
-
     fn refresh_combo_hotkey(&self) {
         (**self).refresh_combo_hotkey();
-    }
-
-    fn refresh_translation_hotkey(&self) {
-        (**self).refresh_translation_hotkey();
     }
 
     fn refresh_switch_style_hotkey(&self) {
@@ -164,8 +146,6 @@ fn persist_settings<T: SettingsWriter>(
     reject_hotkey_collisions(&prefs)?;
     let dictation_shortcut_changed = previous.dictation_hotkey != prefs.dictation_hotkey;
     let dictation_mode_changed = previous.hotkey.mode != prefs.hotkey.mode;
-    let qa_changed = previous.qa_hotkey != prefs.qa_hotkey;
-    let translation_changed = previous.translation_hotkey != prefs.translation_hotkey;
     let switch_style_changed = previous.switch_style_hotkey != prefs.switch_style_hotkey;
     let open_app_changed = previous.open_app_hotkey != prefs.open_app_hotkey;
     coord.write_settings(prefs)?;
@@ -174,12 +154,6 @@ fn persist_settings<T: SettingsWriter>(
     }
     if dictation_shortcut_changed {
         coord.refresh_combo_hotkey();
-    }
-    if qa_changed {
-        coord.refresh_qa_hotkey();
-    }
-    if translation_changed {
-        coord.refresh_translation_hotkey();
     }
     if switch_style_changed {
         coord.refresh_switch_style_hotkey();
@@ -199,9 +173,6 @@ pub fn set_settings(
 ) -> Result<(), String> {
     let packs = coord.style_packs().list().map_err(|e| e.to_string())?;
     sync_style_pack_preferences(&mut prefs, &packs);
-    // 广播给所有 webview。issue #205：QaPanel 跑在独立 webview，
-    // 没有 HotkeySettingsContext，必须靠事件感知录音键变化，否则面板可见时
-    // 用户改键会让浮窗里的 "{recordHotkey}" 文案一直停留在旧值。
     persist_settings(&*coord, prefs.clone())?;
     // refresh_tray_microphone_menu 内部会调用 NSStatusItem.set_menu，必须在主线程上跑。
     // set_settings 本身是同步 Tauri command，在 IPC handler 线程上执行；从这里直接调
@@ -304,214 +275,6 @@ pub(crate) fn activate_builtin_style_mode(
     Ok(())
 }
 
-// ─────────────────────────── release channel (Beta opt-in) ───────────────────────────
-//
-// 渠道偏好的写入路径跟 set_settings 复用 persist_settings：保持热键兜底归一化
-// 跟其他 prefs 写入一致，且写完后 emit "prefs:changed"，让前端跨 webview 同步。
-//
-// 更新：plugin-updater 2.10.1 的 Builder 现在暴露 .endpoints() runtime API（CLAUDE.md
-// 当年记的"不支持"已不成立）。本节配合 `app_check_update_with_channel` 命令实现
-// Beta auto-update：Stable 渠道 → 走 tauri.conf 的默认 endpoints；Beta 渠道 →
-// fetch_latest_beta_release 拿最新 prerelease tag → 拼成 -beta manifest URL →
-// builder.endpoints(vec![url]).build().check()。Stable 用户绝对不会撞到 Beta 包
-// （Beta tag 的 manifest 文件名带 `-beta` 后缀，跟 Stable manifest 在 GitHub
-// Release assets 里物理分离）。
-
-#[tauri::command]
-pub fn get_update_channel(coord: CoordinatorState<'_>) -> UpdateChannel {
-    coord.prefs().get().update_channel
-}
-
-#[tauri::command]
-pub fn set_update_channel(
-    coord: CoordinatorState<'_>,
-    app: AppHandle,
-    channel: UpdateChannel,
-) -> Result<(), String> {
-    let mut prefs = coord.prefs().get();
-    if prefs.update_channel == channel {
-        return Ok(());
-    }
-    prefs.update_channel = channel;
-    persist_settings(&*coord, prefs.clone())?;
-    let _ = app.emit("prefs:changed", &prefs);
-    Ok(())
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LatestBetaRelease {
-    pub tag_name: String,
-    pub html_url: String,
-    pub published_at: String,
-}
-
-/// 拉 GitHub Releases atom feed 找最新 Beta release（tag 以 `-beta-tauri` 结尾）。
-///
-/// 历史：之前用 `api.github.com/repos/.../releases` REST 端点，**未认证 60 req/h/IP**，
-/// 多人多次切 Beta toggle 很容易撞 403 rate limit（用户报"获取 Beta 版本信息失败"
-/// 即是这个）。换成 `releases.atom` 后是公开页面 + CDN cache，没有同等 rate 限制。
-/// Atom feed 不显式标 prerelease，但项目约定 tag 后缀 `-beta-tauri` 必为 Beta，
-/// 所以只用 tag 后缀过滤就够了。
-///
-/// 返回 `Ok(None)` = 当前没发过 Beta 版；`Err(String)` = 网络/解析故障。
-#[tauri::command]
-pub async fn fetch_latest_beta_release() -> Result<Option<LatestBetaRelease>, String> {
-    let resp = net::send_with_retry(|| {
-        net::http()
-            .get("https://github.com/appergb/openless/releases.atom")
-            .timeout(std::time::Duration::from_secs(15))
-    })
-    .await
-    .map_err(|e| format!("fetch releases.atom: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("releases.atom status {}", resp.status()));
-    }
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| format!("read atom body: {e}"))?;
-    Ok(parse_latest_beta_from_atom(&body))
-}
-
-/// 简单字符串解析 atom feed，避免引 XML 库。每个 `<entry>...</entry>` 内含一行
-/// `<link rel="alternate" type="text/html" href=".../releases/tag/<tag>"/>`，
-/// 用 `/releases/tag/` 这个唯一锚点抓 tag。
-fn parse_latest_beta_from_atom(body: &str) -> Option<LatestBetaRelease> {
-    for entry in body.split("<entry>").skip(1) {
-        let entry_body = entry
-            .split_once("</entry>")
-            .map(|(b, _)| b)
-            .unwrap_or(entry);
-        let needle = "/releases/tag/";
-        let tag_start = match entry_body.find(needle) {
-            Some(i) => i + needle.len(),
-            None => continue,
-        };
-        let tag_after = &entry_body[tag_start..];
-        let tag_end = tag_after
-            .find(|c: char| c == '"' || c == '<' || c == ' ' || c == '/')
-            .unwrap_or(tag_after.len());
-        let tag_name = tag_after[..tag_end].to_string();
-        if !tag_name.ends_with("-beta-tauri") {
-            continue;
-        }
-        let html_url = format!("https://github.com/appergb/openless/releases/tag/{tag_name}");
-        let published_at =
-            extract_between(entry_body, "<updated>", "</updated>").unwrap_or_default();
-        return Some(LatestBetaRelease {
-            tag_name,
-            html_url,
-            published_at,
-        });
-    }
-    None
-}
-
-fn extract_between(haystack: &str, open: &str, close: &str) -> Option<String> {
-    let start = haystack.find(open)? + open.len();
-    let end = haystack[start..].find(close)?;
-    Some(haystack[start..start + end].to_string())
-}
-
-// ─────────────────────── Channel-aware updater check ────────────────────────
-//
-// 替换前端原来直接 import('@tauri-apps/plugin-updater').check() 的路径：
-// - Stable 渠道：builder 不动 endpoints，沿用 tauri.conf 配的 stable manifest URL。
-// - Beta 渠道：先 fetch_latest_beta_release 拿最新 prerelease tag，拼成 -beta manifest
-//   URL（同时给一对 mirror + direct），再 builder.endpoints(vec![url])?.build()?.check()。
-//
-// 返回的 Metadata 形状与 plugin-updater 的 JS UpdateMetadata 完全一致（rid +
-// currentVersion 等驼峰字段），前端可以直接 `new Update(metadata)` 复用 plugin
-// 的 download / install / close 实现，无需我们自己写下载和签名校验。
-//
-// 物理隔离：Beta tag 推出来的 manifest 文件名带 `-beta` 后缀（参见 release-tauri.yml
-// 第 382 行注释），跟 Stable 的 `latest-{tgt}-{arch}.json` 在 GitHub Release assets
-// 里是分开的两份文件 —— 即使代码逻辑写错把 Beta URL 传给 Stable 用户，HTTP 也是
-// 直接 404，绝不会拿到错档。
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AppUpdateMetadata {
-    pub rid: tauri::ResourceId,
-    pub current_version: String,
-    pub version: String,
-    pub date: Option<String>,
-    pub body: Option<String>,
-    /// 原始 manifest JSON——`new Update(metadata)` 在 JS 那边会校验它存在；
-    /// 我们透传 plugin 自己 check 时拿到的字段。
-    pub raw_json: serde_json::Value,
-}
-
-/// 决定 manifest 来源后走 plugin-updater 的标准 check 流程。
-/// 渠道：显式传入 `channel` 时用它（关于页固定查 Stable、高级页 Beta 区查 Beta）；
-/// 不传则回落到 `prefs.update_channel`（后台 AutoUpdateGate 自动检查走这条）。
-/// 返回 None = 当前是最新；Some(metadata) = 有新版可装。
-#[tauri::command]
-pub async fn app_check_update_with_channel<R: tauri::Runtime>(
-    coord: CoordinatorState<'_>,
-    webview: tauri::Webview<R>,
-    timeout_ms: Option<u64>,
-    channel: Option<UpdateChannel>,
-) -> Result<Option<AppUpdateMetadata>, String> {
-    use tauri_plugin_updater::UpdaterExt;
-
-    let channel = channel.unwrap_or_else(|| coord.prefs().get().update_channel);
-    let mut builder = webview.updater_builder();
-    if let Some(ms) = timeout_ms {
-        builder = builder.timeout(std::time::Duration::from_millis(ms));
-    }
-    if matches!(channel, UpdateChannel::Beta) {
-        let urls = resolve_beta_manifest_endpoints().await?;
-        builder = builder
-            .endpoints(urls)
-            .map_err(|e| format!("set beta endpoints: {e}"))?;
-    }
-    let updater = builder.build().map_err(|e| format!("build updater: {e}"))?;
-    let update = updater
-        .check()
-        .await
-        .map_err(|e| format!("check update failed: {e}"))?;
-
-    let Some(update) = update else {
-        return Ok(None);
-    };
-    // date 字段透传需要引 time crate；前端 AutoUpdate.tsx 实际并不用 date，所以这里
-    // 直接置 None，避免拉一个新 dep 进 src-tauri/Cargo.toml。
-    let metadata = AppUpdateMetadata {
-        current_version: update.current_version.clone(),
-        version: update.version.clone(),
-        date: None,
-        body: update.body.clone(),
-        raw_json: update.raw_json.clone(),
-        rid: webview.resources_table().add(update),
-    };
-    Ok(Some(metadata))
-}
-
-/// 把 fetch_latest_beta_release 找到的最新 prerelease tag 拼成 -beta manifest URL 对。
-/// 顺序：先镜像（fastgit.cc 代理 GitHub），后直连 —— 跟 tauri.conf 现有 Stable
-/// endpoints 一致，让国内访问优先打到 CDN。
-async fn resolve_beta_manifest_endpoints() -> Result<Vec<url::Url>, String> {
-    let Some(latest) = fetch_latest_beta_release().await? else {
-        return Err("尚未发布过 Beta 版本".to_string());
-    };
-    let tag = latest.tag_name;
-    // {{target}} / {{arch}} 占位符由 plugin 在 check 时替换。Rust raw string 用 r#""#
-    // 不需要转义双花括号，比 format! 干净。
-    let mirror = format!(
-        "https://fastgit.cc/https://github.com/appergb/openless/releases/download/{tag}/latest-{{{{target}}}}-{{{{arch}}}}-beta-mirror.json"
-    );
-    let direct = format!(
-        "https://github.com/appergb/openless/releases/download/{tag}/latest-{{{{target}}}}-{{{{arch}}}}-beta.json"
-    );
-    let mirror_url =
-        url::Url::parse(&mirror).map_err(|e| format!("parse beta mirror url: {e}"))?;
-    let direct_url =
-        url::Url::parse(&direct).map_err(|e| format!("parse beta direct url: {e}"))?;
-    Ok(vec![mirror_url, direct_url])
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NetworkCheckResult {
@@ -521,28 +284,9 @@ pub struct NetworkCheckResult {
 
 #[tauri::command]
 pub async fn check_network() -> NetworkCheckResult {
-    // 探一个真实存在的接口。旧逻辑探 `/health` —— 实测返回 404，链路正常也永远判
-    // 离线；且用 HEAD（后端只挂 GET）。改成 GET `/packs`，拿到任意 HTTP 响应即算通。
-    //
-    // 单发、不走 send_with_retry：这是每 30s 跑一次的状态探针，要的是「快」。10 次
-    // 退避重试会让被过滤 / 黑洞的网络下探测拖到近一分钟、状态灯像卡死。偶发的瞬时
-    // 误判由下一个 30s 周期自动纠正。仍用 net::http() 共享连接池。
-    let url = format!("{MARKETPLACE_BASE_URL}/packs?limit=1");
-    let start = std::time::Instant::now();
-    match net::http()
-        .get(&url)
-        .timeout(std::time::Duration::from_secs(8))
-        .send()
-        .await
-    {
-        Ok(_) => NetworkCheckResult {
-            online: true,
-            latency_ms: Some(start.elapsed().as_millis() as u64),
-        },
-        Err(_) => NetworkCheckResult {
-            online: false,
-            latency_ms: None,
-        },
+    NetworkCheckResult {
+        online: true,
+        latency_ms: None,
     }
 }
 
@@ -1826,54 +1570,6 @@ pub fn trigger_microphone_prompt(app: AppHandle) -> Result<(), String> {
     }
 }
 
-// ─────────────────────────── QA (划词语音问答, issue #118) ───────────────────────────
-
-/// 给前端 Settings 页渲染当前 QA 快捷键 label（如 `"Cmd+Shift+;"`）。
-/// 未启用时返回空串。
-#[tauri::command]
-pub fn get_qa_hotkey_label(coord: CoordinatorState<'_>) -> String {
-    coord.qa_hotkey_label()
-}
-
-/// 设置 QA 快捷键并热更新 monitor。
-/// 传入 `None` 形式的字段不在这里支持——前端用 `binding == null` 时调下面的
-/// "disable" 写法（写 prefs.qa_hotkey = None）即可。
-#[tauri::command]
-pub fn set_qa_hotkey(
-    coord: CoordinatorState<'_>,
-    binding: Option<ShortcutBinding>,
-) -> Result<(), String> {
-    if let Some(binding) = binding.as_ref() {
-        crate::shortcut_binding::validate_binding(binding).map_err(|e| e.to_string())?;
-        if binding.modifiers.is_empty() && binding.primary.eq_ignore_ascii_case("shift") {
-            return Err("Shift 单键目前只能用于翻译快捷键".into());
-        }
-    }
-    let mut prefs = coord.prefs().get();
-    if let Some(binding) = binding.as_ref() {
-        reject_dictation_qa_hotkey_overlap(&prefs.dictation_hotkey, binding)?;
-        reject_qa_translation_hotkey_overlap(binding, &prefs.translation_hotkey)?;
-        reject_qa_switch_style_hotkey_overlap(binding, &prefs.switch_style_hotkey)?;
-        reject_qa_open_app_hotkey_overlap(binding, &prefs.open_app_hotkey)?;
-    }
-    prefs.qa_hotkey = binding;
-    coord.prefs().set(prefs).map_err(|e| e.to_string())?;
-    coord.update_qa_hotkey_binding();
-    Ok(())
-}
-
-/// 用户点 ✕ / 按 Esc 关 QA 浮窗。
-#[tauri::command]
-pub fn qa_window_dismiss(coord: CoordinatorState<'_>) {
-    coord.qa_window_dismiss();
-}
-
-/// 用户点 📌 / 取消 📌。pinned=true 时浮窗不会自动隐藏。
-#[tauri::command]
-pub fn qa_window_pin(coord: CoordinatorState<'_>, pinned: bool) {
-    coord.qa_window_pin(pinned);
-}
-
 // ─────────────────────────── 自定义组合键 ───────────────────────────
 
 /// 测试一个组合键是否可以注册（验证格式，不实际注册）。
@@ -1890,10 +1586,6 @@ pub fn set_dictation_hotkey(
     crate::shortcut_binding::validate_binding(&binding).map_err(|e| e.to_string())?;
     reject_bare_shift_dictation_shortcut(&binding)?;
     let mut prefs = coord.prefs().get();
-    if let Some(qa_hotkey) = prefs.qa_hotkey.as_ref() {
-        reject_dictation_qa_hotkey_overlap(&binding, qa_hotkey)?;
-    }
-    reject_dictation_translation_hotkey_overlap(&binding, &prefs.translation_hotkey)?;
     reject_dictation_switch_style_hotkey_overlap(&binding, &prefs.switch_style_hotkey)?;
     reject_dictation_open_app_hotkey_overlap(&binding, &prefs.open_app_hotkey)?;
     prefs.dictation_hotkey = binding;
@@ -1901,32 +1593,6 @@ pub fn set_dictation_hotkey(
     coord.prefs().set(prefs).map_err(|e| e.to_string())?;
     coord.update_hotkey_binding();
     coord.update_combo_hotkey_binding();
-    Ok(())
-}
-
-#[tauri::command]
-pub fn set_translation_hotkey(
-    coord: CoordinatorState<'_>,
-    binding: ShortcutBinding,
-) -> Result<(), String> {
-    crate::shortcut_binding::validate_binding(&binding).map_err(|e| e.to_string())?;
-    let previous = coord.prefs().get();
-    reject_dictation_translation_hotkey_overlap(&previous.dictation_hotkey, &binding)?;
-    if let Some(qa_hotkey) = previous.qa_hotkey.as_ref() {
-        reject_qa_translation_hotkey_overlap(qa_hotkey, &binding)?;
-    }
-    reject_translation_switch_style_hotkey_overlap(&binding, &previous.switch_style_hotkey)?;
-    reject_translation_open_app_hotkey_overlap(&binding, &previous.open_app_hotkey)?;
-    let mut prefs = previous.clone();
-    prefs.translation_hotkey = binding;
-    coord.prefs().set(prefs).map_err(|e| e.to_string())?;
-    if let Err(e) = coord.try_update_translation_hotkey_binding() {
-        if let Err(rollback_err) = coord.prefs().set(previous) {
-            log::warn!("[commands] 回滚翻译快捷键失败: {rollback_err}");
-        }
-        coord.update_translation_hotkey_binding();
-        return Err(e);
-    }
     Ok(())
 }
 
@@ -1939,10 +1605,6 @@ pub fn set_switch_style_hotkey(
     reject_modifier_only_action_shortcut(&binding)?;
     let mut prefs = coord.prefs().get();
     reject_dictation_switch_style_hotkey_overlap(&prefs.dictation_hotkey, &binding)?;
-    reject_translation_switch_style_hotkey_overlap(&prefs.translation_hotkey, &binding)?;
-    if let Some(qa_hotkey) = prefs.qa_hotkey.as_ref() {
-        reject_qa_switch_style_hotkey_overlap(qa_hotkey, &binding)?;
-    }
     reject_switch_style_open_app_hotkey_overlap(&binding, &prefs.open_app_hotkey)?;
     prefs.switch_style_hotkey = binding;
     coord.prefs().set(prefs).map_err(|e| e.to_string())?;
@@ -1959,10 +1621,6 @@ pub fn set_open_app_hotkey(
     reject_modifier_only_action_shortcut(&binding)?;
     let mut prefs = coord.prefs().get();
     reject_dictation_open_app_hotkey_overlap(&prefs.dictation_hotkey, &binding)?;
-    reject_translation_open_app_hotkey_overlap(&prefs.translation_hotkey, &binding)?;
-    if let Some(qa_hotkey) = prefs.qa_hotkey.as_ref() {
-        reject_qa_open_app_hotkey_overlap(qa_hotkey, &binding)?;
-    }
     reject_switch_style_open_app_hotkey_overlap(&prefs.switch_style_hotkey, &binding)?;
     prefs.open_app_hotkey = binding;
     coord.prefs().set(prefs).map_err(|e| e.to_string())?;
@@ -2000,10 +1658,6 @@ pub fn set_combo_hotkey(coord: CoordinatorState<'_>, binding: ComboBinding) -> R
     };
     reject_bare_shift_dictation_shortcut(&shortcut)?;
     crate::combo_hotkey::validate_binding(&shortcut).map_err(|e| e.to_string())?;
-    if let Some(qa_hotkey) = prefs.qa_hotkey.as_ref() {
-        reject_dictation_qa_hotkey_overlap(&shortcut, qa_hotkey)?;
-    }
-    reject_dictation_translation_hotkey_overlap(&shortcut, &prefs.translation_hotkey)?;
     reject_dictation_switch_style_hotkey_overlap(&shortcut, &prefs.switch_style_hotkey)?;
     reject_dictation_open_app_hotkey_overlap(&shortcut, &prefs.open_app_hotkey)?;
     prefs.custom_combo_hotkey = Some(binding);
@@ -2017,7 +1671,7 @@ pub fn set_combo_hotkey(coord: CoordinatorState<'_>, binding: ComboBinding) -> R
 
 fn reject_bare_shift_dictation_shortcut(binding: &ShortcutBinding) -> Result<(), String> {
     if binding.modifiers.is_empty() && binding.primary.eq_ignore_ascii_case("shift") {
-        return Err("Shift 单键目前只能用于翻译快捷键".into());
+        return Err("Shift 单键不能作为听写快捷键".into());
     }
     Ok(())
 }
@@ -2040,16 +1694,6 @@ fn sync_dictation_hotkey_legacy_fields(prefs: &mut UserPreferences) {
     };
 }
 
-fn reject_dictation_qa_hotkey_overlap(
-    dictation: &ShortcutBinding,
-    qa: &ShortcutBinding,
-) -> Result<(), String> {
-    if shortcut_bindings_overlap(dictation, qa) {
-        return Err("QA 快捷键不能和听写快捷键相同".into());
-    }
-    Ok(())
-}
-
 fn reject_hotkey_overlap(
     left: &ShortcutBinding,
     right: &ShortcutBinding,
@@ -2062,38 +1706,16 @@ fn reject_hotkey_overlap(
 }
 
 fn reject_hotkey_collisions(prefs: &UserPreferences) -> Result<(), String> {
-    if let Some(qa_hotkey) = prefs.qa_hotkey.as_ref() {
-        reject_dictation_qa_hotkey_overlap(&prefs.dictation_hotkey, qa_hotkey)?;
-        reject_qa_translation_hotkey_overlap(qa_hotkey, &prefs.translation_hotkey)?;
-        reject_qa_switch_style_hotkey_overlap(qa_hotkey, &prefs.switch_style_hotkey)?;
-        reject_qa_open_app_hotkey_overlap(qa_hotkey, &prefs.open_app_hotkey)?;
-    }
-    reject_dictation_translation_hotkey_overlap(
-        &prefs.dictation_hotkey,
-        &prefs.translation_hotkey,
-    )?;
     reject_dictation_switch_style_hotkey_overlap(
         &prefs.dictation_hotkey,
         &prefs.switch_style_hotkey,
     )?;
     reject_dictation_open_app_hotkey_overlap(&prefs.dictation_hotkey, &prefs.open_app_hotkey)?;
-    reject_translation_switch_style_hotkey_overlap(
-        &prefs.translation_hotkey,
-        &prefs.switch_style_hotkey,
-    )?;
-    reject_translation_open_app_hotkey_overlap(&prefs.translation_hotkey, &prefs.open_app_hotkey)?;
     reject_switch_style_open_app_hotkey_overlap(
         &prefs.switch_style_hotkey,
         &prefs.open_app_hotkey,
     )?;
     Ok(())
-}
-
-fn reject_dictation_translation_hotkey_overlap(
-    dictation: &ShortcutBinding,
-    translation: &ShortcutBinding,
-) -> Result<(), String> {
-    reject_hotkey_overlap(dictation, translation, "翻译快捷键不能和听写快捷键相同")
 }
 
 fn reject_dictation_switch_style_hotkey_overlap(
@@ -2112,45 +1734,6 @@ fn reject_dictation_open_app_hotkey_overlap(
     open_app: &ShortcutBinding,
 ) -> Result<(), String> {
     reject_hotkey_overlap(dictation, open_app, "打开应用快捷键不能和听写快捷键相同")
-}
-
-fn reject_qa_translation_hotkey_overlap(
-    qa: &ShortcutBinding,
-    translation: &ShortcutBinding,
-) -> Result<(), String> {
-    reject_hotkey_overlap(qa, translation, "翻译快捷键不能和 QA 快捷键相同")
-}
-
-fn reject_qa_switch_style_hotkey_overlap(
-    qa: &ShortcutBinding,
-    switch_style: &ShortcutBinding,
-) -> Result<(), String> {
-    reject_hotkey_overlap(qa, switch_style, "切换风格快捷键不能和 QA 快捷键相同")
-}
-
-fn reject_qa_open_app_hotkey_overlap(
-    qa: &ShortcutBinding,
-    open_app: &ShortcutBinding,
-) -> Result<(), String> {
-    reject_hotkey_overlap(qa, open_app, "打开应用快捷键不能和 QA 快捷键相同")
-}
-
-fn reject_translation_switch_style_hotkey_overlap(
-    translation: &ShortcutBinding,
-    switch_style: &ShortcutBinding,
-) -> Result<(), String> {
-    reject_hotkey_overlap(
-        translation,
-        switch_style,
-        "切换风格快捷键不能和翻译快捷键相同",
-    )
-}
-
-fn reject_translation_open_app_hotkey_overlap(
-    translation: &ShortcutBinding,
-    open_app: &ShortcutBinding,
-) -> Result<(), String> {
-    reject_hotkey_overlap(translation, open_app, "打开应用快捷键不能和翻译快捷键相同")
 }
 
 fn reject_switch_style_open_app_hotkey_overlap(
@@ -2733,558 +2316,6 @@ pub fn export_error_log(target_path: String) -> Result<(), String> {
 #[allow(dead_code)]
 fn _ensure_snapshot_used(_: CredentialsSnapshot) {}
 
-// ─────────────────────────── marketplace (Phase A) ───────────────────────────
-//
-// 客户端跟 marketplace backend 的 HTTP 客户端封装。Backend URL 走 prefs
-// `marketplace_base_url`（默认 http://127.0.0.1:8090 开发；生产用户填 https://api.<domain>）。
-// dev-mode auth：用户在 Settings 填 `marketplace_dev_login`（GitHub 风格 username），
-// 后续 OAuth 接入时换成 token 字段。
-//
-// 5 个 IPC：
-// - marketplace_list      列表 + 搜索 + 排序
-// - marketplace_detail    详情（含完整 prompt）
-// - marketplace_install   下载 ZIP + 直接调 import_from_zip 装到本地
-// - marketplace_upload    把本地某个 style pack export ZIP → multipart 上传
-// - marketplace_like      点赞
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct MarketplaceListItem {
-    pub id: String,
-    pub slug: String,
-    pub name: String,
-    pub description: String,
-    #[serde(default)]
-    pub author_login: String,
-    pub version: String,
-    pub base_mode: String,
-    #[serde(default)]
-    pub tags: Vec<String>,
-    pub like_count: i64,
-    pub download_count: i64,
-    pub published_at: String,
-    pub updated_at: String,
-    pub origin_pack_id: Option<String>,
-    pub origin_author_login: Option<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct MarketplaceDetail {
-    #[serde(flatten)]
-    pub summary: MarketplaceListItem,
-    pub prompt: String,
-    pub state: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct MarketplaceMyPackItem {
-    #[serde(flatten)]
-    pub summary: MarketplaceListItem,
-    pub state: String,
-}
-
-/// 风格市场 backend URL —— 硬编码到生产云端，不再读 prefs。
-///
-/// 历史上这里读 `prefs.marketplace_base_url`（dev 本地可填 127.0.0.1:8090），
-/// 现在风格市场已经稳定部署在 apic.openless.top，把 URL 锁死避免用户误改 / 写错。
-/// 参数 `_prefs` 保留是为不动调用点签名；将来需要白名单 / 多 endpoint 时再开口。
-const MARKETPLACE_BASE_URL: &str = "https://apic.openless.top";
-
-fn marketplace_url_from_prefs(_prefs: &UserPreferences) -> String {
-    MARKETPLACE_BASE_URL.to_string()
-}
-
-fn marketplace_dev_user(prefs: &UserPreferences) -> String {
-    prefs.marketplace_dev_login.trim().to_string()
-}
-
-#[tauri::command]
-pub async fn marketplace_list(
-    coord: CoordinatorState<'_>,
-    query: Option<String>,
-    sort: Option<String>,
-    limit: Option<u32>,
-) -> Result<Vec<MarketplaceListItem>, String> {
-    let prefs = coord.prefs().get();
-    let base = marketplace_url_from_prefs(&prefs);
-    let mut url = reqwest::Url::parse(&format!("{base}/packs"))
-        .map_err(|e| format!("invalid marketplace url: {e}"))?;
-    if let Some(q) = query.as_deref() {
-        if !q.trim().is_empty() {
-            url.query_pairs_mut().append_pair("q", q.trim());
-        }
-    }
-    if let Some(s) = sort.as_deref() {
-        if !s.trim().is_empty() {
-            url.query_pairs_mut().append_pair("sort", s.trim());
-        }
-    }
-    if let Some(n) = limit {
-        url.query_pairs_mut().append_pair("limit", &n.to_string());
-    }
-    let resp = net::send_with_retry(|| {
-        net::http()
-            .get(url.clone())
-            .timeout(std::time::Duration::from_secs(10))
-    })
-    .await
-    .map_err(|e| format!("marketplace request failed: {e}"))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("marketplace HTTP {status}: {body}"));
-    }
-    let items: Vec<MarketplaceListItem> =
-        resp.json().await.map_err(|e| format!("parse failed: {e}"))?;
-    Ok(items)
-}
-
-#[tauri::command]
-pub async fn marketplace_detail(
-    coord: CoordinatorState<'_>,
-    pack_id: String,
-) -> Result<MarketplaceDetail, String> {
-    if !is_valid_session_id(&pack_id) {
-        return Err("invalid pack id".into());
-    }
-    let prefs = coord.prefs().get();
-    let base = marketplace_url_from_prefs(&prefs);
-    let url = format!("{base}/packs/{pack_id}");
-    let resp = net::send_with_retry(|| {
-        net::http()
-            .get(&url)
-            .timeout(std::time::Duration::from_secs(10))
-    })
-    .await
-    .map_err(|e| format!("marketplace request failed: {e}"))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        return Err(format!("marketplace HTTP {status}"));
-    }
-    resp.json::<MarketplaceDetail>()
-        .await
-        .map_err(|e| format!("parse failed: {e}"))
-}
-
-#[tauri::command]
-pub async fn marketplace_install(
-    coord: CoordinatorState<'_>,
-    pack_id: String,
-) -> Result<StylePack, String> {
-    // 安全校验：pack_id 来自远端 backend，可能含路径遍历 segment。
-    // 用跟 read_audio_recording 同样的 UUID-v4 白名单挡住 ../ / 绝对路径等。
-    // backend 当前用 Uuid::new_v4 生成所有 id，合法 id 必然匹配。
-    if !is_valid_session_id(&pack_id) {
-        return Err("invalid pack id".into());
-    }
-    let prefs = coord.prefs().get();
-    let base = marketplace_url_from_prefs(&prefs);
-
-    // 先拉 detail 拿 authorLogin —— 装好后本地写 originAuthorLogin，
-    // 后续编辑+发布时 backend 据此判 supersede（原作者）vs derivative（他人 fork）。
-    let detail_url = format!("{base}/packs/{pack_id}");
-    let detail: serde_json::Value = net::send_with_retry(|| {
-        net::http()
-            .get(&detail_url)
-            .timeout(std::time::Duration::from_secs(15))
-    })
-    .await
-    .map_err(|e| format!("marketplace detail failed: {e}"))?
-    .error_for_status()
-    .map_err(|e| format!("marketplace detail HTTP error: {e}"))?
-    .json()
-    .await
-    .map_err(|e| format!("parse detail failed: {e}"))?;
-    let origin_author_login = detail
-        .get("authorLogin")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let download_url = format!("{base}/packs/{pack_id}/download");
-    let bytes = net::send_with_retry(|| {
-        net::http()
-            .get(&download_url)
-            .timeout(std::time::Duration::from_secs(30))
-    })
-    .await
-    .map_err(|e| format!("marketplace download failed: {e}"))?
-    .error_for_status()
-    .map_err(|e| format!("marketplace HTTP error: {e}"))?
-    .bytes()
-    .await
-    .map_err(|e| format!("read body failed: {e}"))?;
-
-    // pack_id 已经过 UUID 白名单，拼临时文件路径安全。
-    let tmp = std::env::temp_dir().join(format!("openless-marketplace-{pack_id}.zip"));
-    std::fs::write(&tmp, &bytes).map_err(|e| format!("write tmp zip: {e}"))?;
-    let imported_result = coord
-        .style_packs()
-        .import_from_zip(&tmp)
-        .map_err(|e| e.to_string());
-    let _ = std::fs::remove_file(&tmp);
-    let imported = imported_result?;
-
-    // 绑定 origin —— 后续编辑+发布走 derivative / supersede 分支。
-    coord
-        .style_packs()
-        .set_origin(&imported.id, Some(pack_id), origin_author_login)
-        .map_err(|e| format!("set origin failed: {e}"))
-}
-
-#[tauri::command]
-pub async fn marketplace_upload(
-    coord: CoordinatorState<'_>,
-    pack_id: String,
-    origin_pack_id: Option<String>,
-) -> Result<serde_json::Value, String> {
-    // 本地 pack id 形态：`builtin.light` / 用户 slug / Uuid。用 local 白名单挡 `..` / `/` / `\`。
-    if !is_valid_local_pack_id(&pack_id) {
-        return Err("invalid pack id".into());
-    }
-    let prefs = coord.prefs().get();
-    let base = marketplace_url_from_prefs(&prefs);
-    let dev_user = marketplace_dev_user(&prefs);
-    if dev_user.is_empty() {
-        return Err("未登录：先在 Settings 填发布者名字".into());
-    }
-
-    // 拉本地 pack 拿 origin_pack_id —— 装过的 pack 这里有值，
-    // backend 据此判同作者就 supersede 原行（新版本），他人就 derivative（独立新 row）。
-    let local_pack = coord
-        .style_packs()
-        .get(&pack_id)
-        .map_err(|e| format!("local pack not found: {e}"))?;
-    let origin_pack_id = origin_pack_id
-        .filter(|id| is_valid_session_id(id))
-        .or_else(|| local_pack.origin_pack_id.clone());
-
-    // 先 export 本地 pack → 临时 ZIP
-    let tmp = std::env::temp_dir().join(format!("openless-marketplace-upload-{pack_id}.zip"));
-    coord
-        .style_packs()
-        .export_to_zip(&pack_id, &tmp)
-        .map_err(|e| format!("export local pack failed: {e}"))?;
-    let bytes = std::fs::read(&tmp).map_err(|e| format!("read exported zip: {e}"))?;
-    let _ = std::fs::remove_file(&tmp);
-
-    // multipart 上传：表单是流式 body，不走 send_with_retry 的闭包重试；改用共享
-    // 客户端 —— 之前 list/detail 命令若已打开过连接，这里直接复用连接池里的连接。
-    let part = reqwest::multipart::Part::bytes(bytes)
-        .file_name(format!("{pack_id}.zip"))
-        .mime_str("application/zip")
-        .map_err(|e| format!("multipart build failed: {e}"))?;
-    let mut form = reqwest::multipart::Form::new().part("file", part);
-    if let Some(ref oid) = origin_pack_id {
-        form = form.text("origin_pack_id", oid.clone());
-    }
-    let resp = net::http()
-        .post(format!("{base}/packs"))
-        .header("X-Dev-User", dev_user)
-        .timeout(std::time::Duration::from_secs(30))
-        .multipart(form)
-        .send()
-        .await
-        .map_err(|e| format!("upload request failed: {e}"))?;
-    let status = resp.status();
-    let body = resp
-        .text()
-        .await
-        .unwrap_or_else(|e| format!("read body failed: {e}"))
-        .clone();
-    if !status.is_success() {
-        return Err(format!("upload HTTP {status}: {body}"));
-    }
-    let parsed = serde_json::from_str::<serde_json::Value>(&body)
-        .map_err(|e| format!("parse upload response failed: {e}"))?;
-
-    // 本地从未绑定 origin（首次上传一个本地原创 pack）→ 把 backend 分配的 pack id 写回本地，
-    // 让用户在同设备上后续编辑能继续走「同作者 supersede」分支，更新自己原创的包。
-    if origin_pack_id.is_none() {
-        if let Some(remote_id) = parsed.get("id").and_then(|v| v.as_str()) {
-            let prefs2 = coord.prefs().get();
-            let dev_user2 = marketplace_dev_user(&prefs2);
-            let _ = coord.style_packs().set_origin(
-                &pack_id,
-                Some(remote_id.to_string()),
-                Some(dev_user2),
-            );
-        }
-    }
-
-    Ok(parsed)
-}
-
-#[tauri::command]
-pub async fn marketplace_like(
-    coord: CoordinatorState<'_>,
-    pack_id: String,
-) -> Result<serde_json::Value, String> {
-    if !is_valid_session_id(&pack_id) {
-        return Err("invalid pack id".into());
-    }
-    let prefs = coord.prefs().get();
-    let base = marketplace_url_from_prefs(&prefs);
-    let dev_user = marketplace_dev_user(&prefs);
-    if dev_user.is_empty() {
-        return Err("未登录：先在 Settings 填发布者名字".into());
-    }
-    let like_url = format!("{base}/packs/{pack_id}/like");
-    let resp = net::send_with_retry(|| {
-        net::http()
-            .post(&like_url)
-            .header("X-Dev-User", dev_user.as_str())
-            .timeout(std::time::Duration::from_secs(10))
-    })
-    .await
-    .map_err(|e| format!("like request failed: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("like HTTP {}", resp.status()));
-    }
-    resp.json::<serde_json::Value>()
-        .await
-        .map_err(|e| format!("parse failed: {e}"))
-}
-
-/// 撤回自己发布的 pack（后端软删 state='withdrawn'，前端列表不再可见）。
-/// pack_id 来自远端，必须是 UUID-v4。
-#[tauri::command]
-pub async fn marketplace_delete(
-    coord: CoordinatorState<'_>,
-    pack_id: String,
-) -> Result<(), String> {
-    if !is_valid_session_id(&pack_id) {
-        return Err("invalid pack id".into());
-    }
-    let prefs = coord.prefs().get();
-    let base = marketplace_url_from_prefs(&prefs);
-    let dev_user = marketplace_dev_user(&prefs);
-    if dev_user.is_empty() {
-        return Err("未登录：先在 Settings 填发布者名字".into());
-    }
-    let delete_url = format!("{base}/packs/{pack_id}");
-    let resp = net::send_with_retry(|| {
-        net::http()
-            .delete(&delete_url)
-            .header("X-Dev-User", dev_user.as_str())
-            .timeout(std::time::Duration::from_secs(15))
-    })
-    .await
-    .map_err(|e| format!("delete request failed: {e}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("delete HTTP {status}: {body}"));
-    }
-    Ok(())
-}
-
-/// 拉当前用户赞过的所有 pack id，用于客户端市场页面渲染红心 + 「我赞过的」过滤。
-#[tauri::command]
-pub async fn marketplace_my_likes(coord: CoordinatorState<'_>) -> Result<Vec<String>, String> {
-    let prefs = coord.prefs().get();
-    let base = marketplace_url_from_prefs(&prefs);
-    let dev_user = marketplace_dev_user(&prefs);
-    if dev_user.is_empty() {
-        return Ok(Vec::new()); // 未登录就空集合，UI 渲染无红心
-    }
-    let likes_url = format!("{base}/me/likes");
-    let resp = net::send_with_retry(|| {
-        net::http()
-            .get(&likes_url)
-            .header("X-Dev-User", dev_user.as_str())
-            .timeout(std::time::Duration::from_secs(10))
-    })
-    .await
-    .map_err(|e| format!("my-likes request failed: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("my-likes HTTP {}", resp.status()));
-    }
-    resp.json::<Vec<String>>()
-        .await
-        .map_err(|e| format!("parse my-likes failed: {e}"))
-}
-
-/// 拉当前用户发布过的 pack（含审核中/已通过/已拒绝/已撤回），用于「我的发布」页面。
-#[tauri::command]
-pub async fn marketplace_my_packs(
-    coord: CoordinatorState<'_>,
-) -> Result<Vec<MarketplaceMyPackItem>, String> {
-    let prefs = coord.prefs().get();
-    let base = marketplace_url_from_prefs(&prefs);
-    let dev_user = marketplace_dev_user(&prefs);
-    if dev_user.is_empty() {
-        return Ok(Vec::new());
-    }
-    let packs_url = format!("{base}/me/packs");
-    let resp = net::send_with_retry(|| {
-        net::http()
-            .get(&packs_url)
-            .header("X-Dev-User", dev_user.as_str())
-            .timeout(std::time::Duration::from_secs(10))
-    })
-    .await
-    .map_err(|e| format!("my-packs request failed: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("my-packs HTTP {}", resp.status()));
-    }
-    resp.json::<Vec<MarketplaceMyPackItem>>()
-        .await
-        .map_err(|e| format!("parse my-packs failed: {e}"))
-}
-
-// ─────────────────────── GitHub OAuth Device Flow (Phase 1) ───────────────────────
-//
-// 客户端直连 GitHub 拿 access_token + login，前端自动把 login 写进
-// prefs.marketplaceDevLogin。marketplace backend 完全不动（依然 X-Dev-User）。
-// Phase 2 才会让 backend 验证 GitHub identity（JWT 签发 + 防伪造）。
-//
-// 配置 client_id 的两种方式（OAuth App client_id 非敏感，可硬编码）：
-//   1. 在下方 GITHUB_OAUTH_CLIENT_ID 常量填值（生产推荐 — 直接 bake 进二进制）
-//   2. 启动前设置环境变量 GITHUB_OAUTH_CLIENT_ID=<your_client_id>（dev 方便）
-//
-// 注册 OAuth App：
-//   https://github.com/settings/applications/new
-//   - Application name: OpenLess (or your fork)
-//   - Homepage URL: https://openless.top (or任意)
-//   - Authorization callback URL: https://openless.top (Device Flow 不真用，但表单要求填)
-//   - 创建后在 General 页面勾选 "Enable Device Flow"
-//   - 抄 client_id 填到本常量
-
-const GITHUB_OAUTH_CLIENT_ID: &str = "Ov23liyv3nEucG7oMHNE";
-
-fn get_github_oauth_client_id() -> Result<String, String> {
-    if let Ok(env_id) = std::env::var("GITHUB_OAUTH_CLIENT_ID") {
-        let trimmed = env_id.trim();
-        if !trimmed.is_empty() {
-            return Ok(trimmed.to_string());
-        }
-    }
-    if !GITHUB_OAUTH_CLIENT_ID.is_empty() {
-        return Ok(GITHUB_OAUTH_CLIENT_ID.to_string());
-    }
-    Err("GitHub OAuth 未配置。请去 https://github.com/settings/applications/new 注册一个 OAuth App\
-        （必须勾 Enable Device Flow），把 client_id 填到 \
-        openless-all/app/src-tauri/src/commands.rs 的 GITHUB_OAUTH_CLIENT_ID 常量，\
-        或在启动前设置环境变量 GITHUB_OAUTH_CLIENT_ID=<your_client_id>。"
-        .to_string())
-}
-
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GithubDeviceStartResponse {
-    pub device_code: String,
-    pub user_code: String,
-    pub verification_uri: String,
-    pub interval: u32,
-    pub expires_in: u32,
-}
-
-#[tauri::command]
-pub async fn github_device_flow_start() -> Result<GithubDeviceStartResponse, String> {
-    let client_id = get_github_oauth_client_id()?;
-    let resp = net::send_with_retry(|| {
-        net::http()
-            .post("https://github.com/login/device/code")
-            .header("Accept", "application/json")
-            .header("User-Agent", "OpenLess")
-            .timeout(std::time::Duration::from_secs(15))
-            .form(&[("client_id", client_id.as_str()), ("scope", "read:user")])
-    })
-    .await
-    .map_err(|e| format!("调用 GitHub /login/device/code 失败：{e}"))?;
-    let status = resp.status();
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("解析 device/code 响应失败：{e}"))?;
-    if !status.is_success() {
-        let err = body["error"].as_str().unwrap_or("unknown_error");
-        let desc = body["error_description"].as_str().unwrap_or("");
-        return Err(format!("GitHub device/code {status} {err}: {desc}"));
-    }
-    Ok(GithubDeviceStartResponse {
-        device_code: body["device_code"].as_str().unwrap_or("").to_string(),
-        user_code: body["user_code"].as_str().unwrap_or("").to_string(),
-        verification_uri: body["verification_uri"]
-            .as_str()
-            .unwrap_or("https://github.com/login/device")
-            .to_string(),
-        interval: body["interval"].as_u64().unwrap_or(5) as u32,
-        expires_in: body["expires_in"].as_u64().unwrap_or(900) as u32,
-    })
-}
-
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase", tag = "kind")]
-pub enum GithubDevicePollResult {
-    Authorized { login: String },
-    Pending,
-    SlowDown,
-    Error { message: String },
-}
-
-#[tauri::command]
-pub async fn github_device_flow_poll(
-    device_code: String,
-) -> Result<GithubDevicePollResult, String> {
-    let client_id = get_github_oauth_client_id()?;
-    let token_resp = net::send_with_retry(|| {
-        net::http()
-            .post("https://github.com/login/oauth/access_token")
-            .header("Accept", "application/json")
-            .header("User-Agent", "OpenLess")
-            .timeout(std::time::Duration::from_secs(15))
-            .form(&[
-                ("client_id", client_id.as_str()),
-                ("device_code", device_code.as_str()),
-                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-            ])
-    })
-    .await
-    .map_err(|e| format!("调用 GitHub /login/oauth/access_token 失败：{e}"))?;
-    let body: serde_json::Value = token_resp
-        .json()
-        .await
-        .map_err(|e| format!("解析 access_token 响应失败：{e}"))?;
-
-    if let Some(token) = body["access_token"].as_str() {
-        let user_resp = net::send_with_retry(|| {
-            net::http()
-                .get("https://api.github.com/user")
-                .header("User-Agent", "OpenLess")
-                .header("Accept", "application/vnd.github+json")
-                .timeout(std::time::Duration::from_secs(15))
-                .bearer_auth(token)
-        })
-        .await
-        .map_err(|e| format!("调用 GitHub /user 失败：{e}"))?;
-        let user_body: serde_json::Value = user_resp
-            .json()
-            .await
-            .map_err(|e| format!("解析 /user 响应失败：{e}"))?;
-        let login = user_body["login"].as_str().unwrap_or("").to_string();
-        if login.is_empty() {
-            return Ok(GithubDevicePollResult::Error {
-                message: "GitHub /user 返回空 login".to_string(),
-            });
-        }
-        return Ok(GithubDevicePollResult::Authorized { login });
-    }
-
-    let err = body["error"].as_str().unwrap_or("");
-    let msg = match err {
-        "authorization_pending" => return Ok(GithubDevicePollResult::Pending),
-        "slow_down" => return Ok(GithubDevicePollResult::SlowDown),
-        "expired_token" => "OAuth 设备码已过期，请重新发起登录".to_string(),
-        "access_denied" => "你在 GitHub 上拒绝了授权".to_string(),
-        other if !other.is_empty() => format!("OAuth 错误：{other}"),
-        _ => "未知 OAuth 错误（access_token 缺失）".to_string(),
-    };
-    Ok(GithubDevicePollResult::Error { message: msg })
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -3292,9 +2323,8 @@ mod tests {
         asr_configured_for_provider, asr_transcriptions_url, fetch_provider_models,
         is_gemini_base_url, is_valid_local_pack_id, is_valid_session_id,
         llm_configured_for_provider, local_asr_release_plan_for_provider, models_url,
-        normalize_foundry_language_hint, parse_gemini_model_ids, parse_latest_beta_from_atom,
-        parse_model_ids, persist_settings, release_foundry_runtime_if_inactive,
-        release_sherpa_runtime_if_inactive,
+        normalize_foundry_language_hint, parse_gemini_model_ids, parse_model_ids,
+        persist_settings, release_foundry_runtime_if_inactive, release_sherpa_runtime_if_inactive,
         validate_foundry_model_alias, ProviderConfig, SettingsWriter,
     };
     use crate::persistence::CredentialsSnapshot;
@@ -3310,9 +2340,7 @@ mod tests {
     struct FakeSettingsWriter {
         saved: Mutex<Option<UserPreferences>>,
         dictation_refreshes: Mutex<u32>,
-        qa_refreshes: Mutex<u32>,
         combo_refreshes: Mutex<u32>,
-        translation_refreshes: Mutex<u32>,
         switch_style_refreshes: Mutex<u32>,
         open_app_refreshes: Mutex<u32>,
     }
@@ -3584,16 +2612,8 @@ mod tests {
             *self.dictation_refreshes.lock().unwrap() += 1;
         }
 
-        fn refresh_qa_hotkey(&self) {
-            *self.qa_refreshes.lock().unwrap() += 1;
-        }
-
         fn refresh_combo_hotkey(&self) {
             *self.combo_refreshes.lock().unwrap() += 1;
-        }
-
-        fn refresh_translation_hotkey(&self) {
-            *self.translation_refreshes.lock().unwrap() += 1;
         }
 
         fn refresh_switch_style_hotkey(&self) {
@@ -3720,14 +2740,6 @@ mod tests {
                 primary: "D".to_string(),
                 modifiers: vec!["ctrl".to_string()],
             },
-            qa_hotkey: Some(ShortcutBinding {
-                primary: "Q".to_string(),
-                modifiers: vec!["ctrl".to_string(), "alt".to_string()],
-            }),
-            translation_hotkey: ShortcutBinding {
-                primary: "T".to_string(),
-                modifiers: vec!["ctrl".to_string(), "alt".to_string()],
-            },
             switch_style_hotkey: ShortcutBinding {
                 primary: "S".to_string(),
                 modifiers: vec!["ctrl".to_string(), "alt".to_string()],
@@ -3758,11 +2770,8 @@ mod tests {
             saved.dictation_hotkey.primary,
             prefs.dictation_hotkey.primary
         );
-        assert_eq!(saved.qa_hotkey.unwrap().primary, "Q");
         assert_eq!(*writer.dictation_refreshes.lock().unwrap(), 1);
         assert_eq!(*writer.combo_refreshes.lock().unwrap(), 1);
-        assert_eq!(*writer.qa_refreshes.lock().unwrap(), 1);
-        assert_eq!(*writer.translation_refreshes.lock().unwrap(), 1);
         assert_eq!(*writer.switch_style_refreshes.lock().unwrap(), 1);
         assert_eq!(*writer.open_app_refreshes.lock().unwrap(), 1);
     }
@@ -3777,8 +2786,6 @@ mod tests {
             microphone_device_name: "External Mic".to_string(),
             hotkey: previous.hotkey,
             dictation_hotkey: previous.dictation_hotkey,
-            qa_hotkey: previous.qa_hotkey,
-            translation_hotkey: previous.translation_hotkey,
             switch_style_hotkey: previous.switch_style_hotkey,
             open_app_hotkey: previous.open_app_hotkey,
             ..Default::default()
@@ -3796,8 +2803,6 @@ mod tests {
         assert_eq!(saved.microphone_device_name, prefs.microphone_device_name);
         assert_eq!(*writer.dictation_refreshes.lock().unwrap(), 0);
         assert_eq!(*writer.combo_refreshes.lock().unwrap(), 0);
-        assert_eq!(*writer.qa_refreshes.lock().unwrap(), 0);
-        assert_eq!(*writer.translation_refreshes.lock().unwrap(), 0);
         assert_eq!(*writer.switch_style_refreshes.lock().unwrap(), 0);
         assert_eq!(*writer.open_app_refreshes.lock().unwrap(), 0);
     }
@@ -3897,138 +2902,8 @@ mod tests {
 
         assert_eq!(
             super::reject_bare_shift_dictation_shortcut(&binding),
-            Err("Shift 单键目前只能用于翻译快捷键".into())
+            Err("Shift 单键不能作为听写快捷键".into())
         );
-    }
-
-    #[test]
-    fn dictation_qa_overlap_rejects_same_modifier_only_binding() {
-        let binding = ShortcutBinding {
-            primary: "RightControl".into(),
-            modifiers: vec![],
-        };
-
-        assert_eq!(
-            super::reject_dictation_qa_hotkey_overlap(&binding, &binding),
-            Err("QA 快捷键不能和听写快捷键相同".into())
-        );
-    }
-
-    #[test]
-    fn dictation_qa_overlap_rejects_same_combo_binding() {
-        let dictation = ShortcutBinding {
-            primary: ";".into(),
-            modifiers: vec!["ctrl".into(), "shift".into()],
-        };
-        let qa = ShortcutBinding {
-            primary: ";".into(),
-            modifiers: vec!["control".into(), "shift".into()],
-        };
-
-        assert_eq!(
-            super::reject_dictation_qa_hotkey_overlap(&dictation, &qa),
-            Err("QA 快捷键不能和听写快捷键相同".into())
-        );
-    }
-
-    #[test]
-    fn dictation_qa_overlap_allows_distinct_bindings() {
-        let dictation = ShortcutBinding {
-            primary: "RightControl".into(),
-            modifiers: vec![],
-        };
-        let qa = ShortcutBinding {
-            primary: ";".into(),
-            modifiers: vec!["ctrl".into(), "shift".into()],
-        };
-
-        assert!(super::reject_dictation_qa_hotkey_overlap(&dictation, &qa).is_ok());
-    }
-
-    #[test]
-    fn dictation_translation_overlap_rejects_same_modifier_only_binding() {
-        let binding = ShortcutBinding {
-            primary: "RightControl".into(),
-            modifiers: vec![],
-        };
-
-        assert_eq!(
-            super::reject_dictation_translation_hotkey_overlap(&binding, &binding),
-            Err("翻译快捷键不能和听写快捷键相同".into())
-        );
-    }
-
-    #[test]
-    fn dictation_translation_overlap_rejects_same_combo_binding() {
-        let dictation = ShortcutBinding {
-            primary: "T".into(),
-            modifiers: vec!["ctrl".into(), "shift".into()],
-        };
-        let translation = ShortcutBinding {
-            primary: "T".into(),
-            modifiers: vec!["control".into(), "shift".into()],
-        };
-
-        assert_eq!(
-            super::reject_dictation_translation_hotkey_overlap(&dictation, &translation),
-            Err("翻译快捷键不能和听写快捷键相同".into())
-        );
-    }
-
-    #[test]
-    fn dictation_translation_overlap_allows_distinct_bindings() {
-        let dictation = ShortcutBinding {
-            primary: "RightControl".into(),
-            modifiers: vec![],
-        };
-        let translation = ShortcutBinding {
-            primary: "Shift".into(),
-            modifiers: vec![],
-        };
-
-        assert!(
-            super::reject_dictation_translation_hotkey_overlap(&dictation, &translation).is_ok()
-        );
-    }
-
-    #[test]
-    fn persist_settings_rejects_dictation_translation_overlap() {
-        let writer = FakeSettingsWriter::default();
-        let binding = ShortcutBinding {
-            primary: "RightControl".into(),
-            modifiers: vec![],
-        };
-        let prefs = UserPreferences {
-            dictation_hotkey: binding.clone(),
-            translation_hotkey: binding,
-            ..Default::default()
-        };
-
-        assert_eq!(
-            persist_settings(&writer, prefs),
-            Err("翻译快捷键不能和听写快捷键相同".into())
-        );
-        assert!(writer.saved.lock().unwrap().is_none());
-    }
-
-    #[test]
-    fn persist_settings_rejects_translation_switch_style_overlap() {
-        let writer = FakeSettingsWriter::default();
-        let binding = ShortcutBinding {
-            primary: "T".into(),
-            modifiers: vec!["cmd".into(), "shift".into()],
-        };
-        let prefs = UserPreferences {
-            translation_hotkey: binding.clone(),
-            switch_style_hotkey: binding,
-            ..Default::default()
-        };
-
-        assert_eq!(
-            persist_settings(&writer, prefs),
-            Err("切换风格快捷键不能和翻译快捷键相同".into())
-        );
-        assert!(writer.saved.lock().unwrap().is_none());
     }
 
     #[test]
@@ -4049,45 +2924,6 @@ mod tests {
             Err("打开应用快捷键不能和切换风格快捷键相同".into())
         );
         assert!(writer.saved.lock().unwrap().is_none());
-    }
-
-    #[test]
-    fn parse_latest_beta_from_atom_picks_first_beta_tagged_entry() {
-        // Fixture trimmed from real `releases.atom`：包含一条 stable + 一条 Beta。
-        // 解析必须跳过 stable（tag 不以 -beta-tauri 结尾），返回 Beta。
-        let body = r#"<?xml version="1.0"?>
-<feed>
-  <entry>
-    <id>tag:github.com,2008:Repository/X/v1.2.23-tauri</id>
-    <updated>2026-05-07T09:05:00Z</updated>
-    <link rel="alternate" type="text/html" href="https://github.com/appergb/openless/releases/tag/v1.2.23-tauri"/>
-    <title>OpenLess v1.2.23-tauri</title>
-  </entry>
-  <entry>
-    <id>tag:github.com,2008:Repository/X/v1.2.24-2-beta-tauri</id>
-    <updated>2026-05-08T01:27:23Z</updated>
-    <link rel="alternate" type="text/html" href="https://github.com/appergb/openless/releases/tag/v1.2.24-2-beta-tauri"/>
-    <title>OpenLess v1.2.24-2-beta-tauri</title>
-  </entry>
-</feed>"#;
-        let got = parse_latest_beta_from_atom(body).expect("must find a Beta entry");
-        assert_eq!(got.tag_name, "v1.2.24-2-beta-tauri");
-        assert_eq!(
-            got.html_url,
-            "https://github.com/appergb/openless/releases/tag/v1.2.24-2-beta-tauri"
-        );
-        assert_eq!(got.published_at, "2026-05-08T01:27:23Z");
-    }
-
-    #[test]
-    fn parse_latest_beta_from_atom_returns_none_when_only_stable_releases() {
-        let body = r#"<feed>
-  <entry>
-    <link rel="alternate" type="text/html" href="https://github.com/appergb/openless/releases/tag/v1.2.23-tauri"/>
-    <updated>2026-05-07T09:05:00Z</updated>
-  </entry>
-</feed>"#;
-        assert!(parse_latest_beta_from_atom(body).is_none());
     }
 
     #[tokio::test]

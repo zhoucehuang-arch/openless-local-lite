@@ -6,10 +6,7 @@ export type AppTab =
   | 'overview'
   | 'history'
   | 'vocab'
-  | 'style'
-  | 'translation'
-  | 'selectionAsk'
-  | 'localAsr';
+  | 'style';
 
 export interface AppState {
   currentTab: AppTab;

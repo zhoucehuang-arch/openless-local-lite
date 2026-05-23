@@ -2,13 +2,10 @@
 
 import { useTranslation } from 'react-i18next';
 import { ShortcutRecorder } from '../../components/ShortcutRecorder';
-import { defaultQaShortcut } from '../../lib/hotkey';
 import {
   setDictationHotkey,
   setOpenAppHotkey,
-  setQaHotkey,
   setSwitchStyleHotkey,
-  setTranslationHotkey,
 } from '../../lib/ipc';
 import { useHotkeySettings } from '../../state/HotkeySettingsContext';
 import { Card } from '../_atoms';
@@ -47,39 +44,6 @@ export function ShortcutsSection() {
             {hotkey.mode === 'hold' ? t('hotkey.modeHoldSuffix') : t('hotkey.modeToggleSuffix')}
           </div>
         </div>
-      </SettingRow>
-      <SettingRow label={t('translation.hotkey.title', 'Translation shortcut')}>
-        <ShortcutRecorder
-          value={prefs.translationHotkey}
-          alignRecordButton
-          onSave={async binding => {
-            await setTranslationHotkey(binding);
-            await savePrefs({ ...prefs, translationHotkey: binding });
-          }}
-        />
-      </SettingRow>
-      <SettingRow label={t('selectionAsk.hotkey.title')}>
-        {prefs.qaHotkey ? (
-          <ShortcutRecorder
-            value={prefs.qaHotkey}
-            alignRecordButton
-            onSave={async binding => {
-              await setQaHotkey(binding);
-              await savePrefs({ ...prefs, qaHotkey: binding });
-            }}
-          />
-        ) : (
-          <button
-            onClick={async () => {
-              const binding = defaultQaShortcut();
-              await setQaHotkey(binding);
-              await savePrefs({ ...prefs, qaHotkey: binding });
-            }}
-            style={{ fontSize: 12, padding: '5px 14px', background: 'var(--ol-blue)', color: '#fff', border: 0, borderRadius: 6, fontFamily: 'inherit', fontWeight: 500, cursor: 'default' }}
-          >
-            {t('selectionAsk.hotkey.enable', 'Enable')}
-          </button>
-        )}
       </SettingRow>
       <SettingRow label={t('settings.shortcuts.switchStyle')}>
         <ShortcutRecorder

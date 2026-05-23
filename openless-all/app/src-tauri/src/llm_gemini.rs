@@ -8,8 +8,7 @@
 //! 3. **请求/响应 shape**——原生 `contents` 走 `role: user|model`，没有
 //!    chat completions 的 system role；要走 `systemInstruction` 字段。
 //!
-//! prompt 装配 (system_prompt / user_prompt / qa system_prompt) 复用
-//! `polish.rs::compose_*` pub(crate) 装配函数，避免两路 LLM 客户端漂移。
+//! prompt 装配复用 `polish.rs::compose_polish_prompts`，避免两路 LLM 客户端漂移。
 //! `clean_polish_output` 也复用——polish 提示词禁的"以下是整理后的内容"
 //! 前缀只有走它才能在原生路径上同样剥离。
 
@@ -17,11 +16,8 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use crate::polish::{
-    clean_polish_output, compose_polish_prompts, compose_qa_system_prompt,
-    compose_translate_prompts, safe_str_slice, LLMError,
-};
-use crate::types::{ChineseScriptPreference, OutputLanguagePreference, PolishMode, QaChatMessage};
+use crate::polish::{clean_polish_output, compose_polish_prompts, safe_str_slice, LLMError};
+use crate::types::{ChineseScriptPreference, OutputLanguagePreference, PolishMode};
 
 const DEFAULT_TEMPERATURE: f32 = 0.3;
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
@@ -115,77 +111,6 @@ impl GeminiProvider {
         let body_text = self.send_unary(&url, &body).await?;
         let raw = extract_assistant_content(&body_text)?;
         Ok(clean_polish_output(&raw))
-    }
-
-    pub async fn translate_to(
-        &self,
-        raw_text: &str,
-        target_language: &str,
-        working_languages: &[String],
-        chinese_script_preference: ChineseScriptPreference,
-        _output_language_preference: OutputLanguagePreference,
-        front_app: Option<&str>,
-    ) -> Result<String, LLMError> {
-        let (system_prompt, user_prompt) = compose_translate_prompts(
-            raw_text,
-            target_language,
-            working_languages,
-            chinese_script_preference,
-            front_app,
-        );
-
-        let contents = vec![user_content(&user_prompt)];
-        let body = self.build_generate_body(&system_prompt, contents);
-        let url = generate_content_url(&self.config.base_url, &self.config.model);
-
-        log::info!(
-            "[llm] POST {} provider=gemini model={} translate=true",
-            url,
-            self.config.model
-        );
-
-        let body_text = self.send_unary(&url, &body).await?;
-        let raw = extract_assistant_content(&body_text)?;
-        Ok(clean_polish_output(&raw))
-    }
-
-    /// 划词语音问答的流式回答。Gemini 原生 SSE: `:streamGenerateContent?alt=sse`，
-    /// 每个 `data: {...}` 帧里 `candidates[0].content.parts[0].text` 是 delta；
-    /// 流结束没有 `[DONE]` sentinel，stream 自然终止。
-    pub async fn answer_chat_streaming<F, C>(
-        &self,
-        messages: &[QaChatMessage],
-        working_languages: &[String],
-        chinese_script_preference: ChineseScriptPreference,
-        output_language_preference: OutputLanguagePreference,
-        front_app: Option<&str>,
-        on_delta: F,
-        should_cancel: C,
-    ) -> Result<String, LLMError>
-    where
-        F: Fn(&str) + Send + Sync,
-        C: Fn() -> bool + Send + Sync,
-    {
-        let system_prompt = compose_qa_system_prompt(
-            working_languages,
-            chinese_script_preference,
-            output_language_preference,
-            front_app,
-        );
-
-        let contents = qa_messages_to_contents(messages);
-        let body = self.build_generate_body(&system_prompt, contents);
-        let url = stream_generate_content_url(&self.config.base_url, &self.config.model);
-
-        log::info!(
-            "[llm] POST {} provider=gemini model={} chat_turns={} stream=true",
-            url,
-            self.config.model,
-            messages.len()
-        );
-
-        self.send_streaming(&url, &body, on_delta, should_cancel)
-            .await
     }
 
     /// `generationConfig` 注入：温度 + 渠道级 thinkingConfig。
@@ -439,23 +364,6 @@ fn build_polish_history_contents(
     contents
 }
 
-/// QA chat messages → Gemini contents：assistant role 重命名为 model。
-/// QaChatMessage.role 在 polish.rs OpenAI 路径里是 `"user" | "assistant"`；
-/// 这里把 `assistant` 翻成 Gemini 的 `model`，其它原样保留。
-fn qa_messages_to_contents(messages: &[QaChatMessage]) -> Vec<Value> {
-    messages
-        .iter()
-        .map(|m| {
-            let role = if m.role == "assistant" {
-                "model"
-            } else {
-                "user"
-            };
-            json!({ "role": role, "parts": [{ "text": m.content }] })
-        })
-        .collect()
-}
-
 /// Gemini 原生通道的关闭/最低思考请求。
 ///
 /// OpenLess 不维护 Gemini 单模型适配表；开启时不下发 thinkingConfig，关闭时
@@ -574,28 +482,6 @@ mod tests {
         assert_eq!(contents[5]["parts"][0]["text"], "polished-newest");
         assert_eq!(contents[6]["role"], "user");
         assert_eq!(contents[6]["parts"][0]["text"], "USER_NOW");
-    }
-
-    #[test]
-    fn qa_messages_assistant_role_is_remapped_to_model() {
-        let messages = vec![
-            QaChatMessage {
-                role: "user".into(),
-                content: "选区是什么意思".into(),
-            },
-            QaChatMessage {
-                role: "assistant".into(),
-                content: "这是一段示例文本".into(),
-            },
-            QaChatMessage {
-                role: "user".into(),
-                content: "继续问".into(),
-            },
-        ];
-        let contents = qa_messages_to_contents(&messages);
-        assert_eq!(contents[0]["role"], "user");
-        assert_eq!(contents[1]["role"], "model");
-        assert_eq!(contents[2]["role"], "user");
     }
 
     #[test]

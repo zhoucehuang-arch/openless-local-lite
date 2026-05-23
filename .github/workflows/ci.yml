@@ -112,7 +112,7 @@ jobs:
         # 两个平台都跑这个校验：Windows runner 自带 git-bash，跨 shell 表现一致。
         # 一旦版本号 drift 立刻 fail，避免发版时再发现漏改。
         # 校验 5 处：package.json / package-lock.json (root + nested) /
-        # tauri.conf.json / Cargo.toml / Cargo.lock 的 [openless] 包。
+          # tauri.conf.json / Cargo.toml / Cargo.lock 的 [openless-local] 包。
         shell: bash
         run: |
           PKG=$(node -p "require('./package.json').version")
@@ -120,8 +120,8 @@ jobs:
           LOCK_NESTED=$(node -p "require('./package-lock.json').packages[''].version")
           TAU=$(node -p "require('./src-tauri/tauri.conf.json').version")
           CRG=$(grep -E '^version = ' src-tauri/Cargo.toml | head -1 | sed -E 's/^version = "(.+)"$/\1/')
-          # Cargo.lock：找 [openless] 包紧跟的 version 行
-          CARGO_LOCK_VER=$(awk 'BEGIN{found=0} /^name = "openless"$/{found=1; next} found && /^version = /{gsub(/"/,""); print $3; exit}' src-tauri/Cargo.lock)
+          # Cargo.lock：找 [openless-local] 包紧跟的 version 行
+          CARGO_LOCK_VER=$(awk 'BEGIN{found=0} /^name = "openless-local"$/{found=1; next} found && /^version = /{gsub(/"/,""); print $3; exit}' src-tauri/Cargo.lock)
           echo "package.json         = $PKG"
           echo "package-lock root    = $LOCK_ROOT"
           echo "package-lock nested  = $LOCK_NESTED"
