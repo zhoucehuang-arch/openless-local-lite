@@ -28,9 +28,9 @@ use crate::persistence::{
     PreferencesStore,
 };
 use crate::polish::{
-    http_client_builder, CodexOAuthConfig, CodexOAuthCredentials, CodexOAuthLLMProvider, LLMError,
-    OpenAICompatibleConfig, OpenAICompatibleLLMProvider, CODEX_DEFAULT_MODEL,
-    CODEX_OAUTH_PROVIDER_ID,
+    http_client_builder, openai_compatible_endpoint_url, CodexOAuthConfig, CodexOAuthCredentials,
+    CodexOAuthLLMProvider, LLMError, OpenAICompatibleConfig, OpenAICompatibleLLMProvider,
+    CODEX_DEFAULT_MODEL, CODEX_OAUTH_PROVIDER_ID,
 };
 use crate::recorder::{AudioConsumer, Recorder};
 use crate::types::{
@@ -307,7 +307,13 @@ pub fn set_shortcut_recording_active(coord: CoordinatorState<'_>, active: bool) 
 
 #[tauri::command]
 pub fn get_windows_ime_status() -> WindowsImeStatus {
-    crate::windows_ime_profile::get_windows_ime_status()
+    WindowsImeStatus {
+        state: crate::types::WindowsImeInstallState::NotWindows,
+        using_tsf_backend: false,
+        message: "OpenLess Local Lite uses Unicode insertion and does not install a Windows input method."
+            .to_string(),
+        dll_path: None,
+    }
 }
 
 #[tauri::command]
@@ -422,6 +428,7 @@ fn llm_provider_default_endpoint(provider: &str) -> Option<&'static str> {
         "deepseek" => Some("https://api.deepseek.com/v1"),
         "siliconflow" => Some("https://api.siliconflow.cn/v1"),
         "openai" => Some("https://api.openai.com/v1"),
+        "aiInput" => Some("https://ai.input.im"),
         // 谷歌 Gemini 原生 API（v1beta）。后端 llm_gemini.rs 会拼成
         // `{baseUrl}/models/{model}:generateContent`，认证用 x-goog-api-key 头。
         "gemini" => Some("https://generativelanguage.googleapis.com/v1beta"),
@@ -879,6 +886,8 @@ fn asr_transcriptions_url(base_url: &str) -> Result<String, String> {
         format!("{path}/transcriptions")
     } else if let Some(prefix) = path.strip_suffix("/chat/completions") {
         format!("{prefix}/audio/transcriptions")
+    } else if path.is_empty() {
+        "/v1/audio/transcriptions".to_string()
     } else {
         format!("{path}/audio/transcriptions")
     };
@@ -960,14 +969,7 @@ fn is_gemini_base_url(base_url: &str) -> bool {
 }
 
 fn models_url(base_url: &str) -> String {
-    let trimmed = base_url.trim().trim_end_matches('/');
-    if trimmed.ends_with("/models") {
-        return trimmed.to_string();
-    }
-    if let Some(prefix) = trimmed.strip_suffix("/chat/completions") {
-        return format!("{prefix}/models");
-    }
-    format!("{trimmed}/models")
+    openai_compatible_endpoint_url(base_url, "models")
 }
 
 fn parse_model_ids(body: &str) -> Result<Vec<String>, String> {
@@ -2635,6 +2637,10 @@ mod tests {
             models_url("https://api.openai.com/v1/chat/completions"),
             "https://api.openai.com/v1/models"
         );
+        assert_eq!(
+            models_url("https://ai.input.im"),
+            "https://ai.input.im/v1/models"
+        );
     }
 
     #[test]
@@ -2658,6 +2664,10 @@ mod tests {
         assert_eq!(
             asr_transcriptions_url("https://api.openai.com/v1?api-version=2024-12-01").unwrap(),
             "https://api.openai.com/v1/audio/transcriptions?api-version=2024-12-01"
+        );
+        assert_eq!(
+            asr_transcriptions_url("https://ai.input.im").unwrap(),
+            "https://ai.input.im/v1/audio/transcriptions"
         );
     }
 

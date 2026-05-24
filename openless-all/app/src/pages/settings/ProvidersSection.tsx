@@ -69,6 +69,12 @@ const LLM_PRESETS = [
     modelPlaceholder: 'gpt-4o',
   },
   {
+    id: 'aiInput',
+    nameKey: 'aiInput',
+    baseUrl: 'https://ai.input.im',
+    modelPlaceholder: 'gpt-5.2-chat-latest',
+  },
+  {
     // 谷歌官方 Gemini API（原生 generateContent，不走 OpenAI 兼容 shim）。
     // baseUrl 末尾 /v1beta 是当前 Generally Available 的 path（ai.google.dev/api）。
     // 后端 llm_gemini.rs 会拼成 `{baseUrl}/models/{model}:generateContent`，

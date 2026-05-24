@@ -900,13 +900,36 @@ fn build_polish_history_messages(
     messages
 }
 
-fn chat_completions_url(base_url: &str) -> String {
+pub(crate) fn openai_compatible_endpoint_url(base_url: &str, endpoint: &str) -> String {
     let trimmed = base_url.trim();
-    if trimmed.ends_with("/chat/completions") {
-        return trimmed.to_string();
+    let endpoint = endpoint.trim_matches('/');
+    if trimmed.is_empty() {
+        return format!("/{endpoint}");
     }
-    let without_trailing = trimmed.strip_suffix('/').unwrap_or(trimmed);
-    format!("{}/chat/completions", without_trailing)
+
+    if let Ok(mut url) = reqwest::Url::parse(trimmed) {
+        let path = url.path().trim_end_matches('/');
+        let endpoint_suffix = format!("/{endpoint}");
+        if path.ends_with(&endpoint_suffix) {
+            return url.to_string();
+        }
+        let path = path.strip_suffix("/chat/completions").unwrap_or(path);
+        let base_path = if path.is_empty() { "/v1" } else { path };
+        let next_path = format!("{}/{}", base_path.trim_end_matches('/'), endpoint);
+        url.set_path(&next_path);
+        return url.to_string();
+    }
+
+    let without_trailing = trimmed.trim_end_matches('/');
+    let endpoint_suffix = format!("/{endpoint}");
+    if without_trailing.ends_with(&endpoint_suffix) {
+        return without_trailing.to_string();
+    }
+    format!("{}/{}", without_trailing, endpoint)
+}
+
+fn chat_completions_url(base_url: &str) -> String {
+    openai_compatible_endpoint_url(base_url, "chat/completions")
 }
 
 pub(crate) fn http_client_builder(base_url: &str, timeout_secs: u64) -> reqwest::ClientBuilder {
@@ -1849,7 +1872,7 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             let request = read_http_request(&mut stream);
             let request_text = String::from_utf8_lossy(&request);
-            assert!(request_text.starts_with("POST /chat/completions HTTP/1.1"));
+            assert!(request_text.starts_with("POST /v1/chat/completions HTTP/1.1"));
             write_chunked_sse_response(&mut stream, &[&first, &second]);
         });
 
@@ -2211,6 +2234,33 @@ mod tests {
         assert!(body.get("reasoning_effort").is_none());
         assert!(body.get("enable_thinking").is_none());
         assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn openai_compatible_endpoint_url_adds_v1_for_origin_only_base() {
+        assert_eq!(
+            openai_compatible_endpoint_url("https://ai.input.im", "chat/completions"),
+            "https://ai.input.im/v1/chat/completions"
+        );
+        assert_eq!(
+            openai_compatible_endpoint_url("https://ai.input.im/", "models"),
+            "https://ai.input.im/v1/models"
+        );
+    }
+
+    #[test]
+    fn openai_compatible_endpoint_url_preserves_v1_and_queries() {
+        assert_eq!(
+            openai_compatible_endpoint_url("https://api.openai.com/v1", "chat/completions"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(
+            openai_compatible_endpoint_url(
+                "https://example.com/openai/deployments/gpt-4/chat/completions?api-version=2024-12-01",
+                "models"
+            ),
+            "https://example.com/openai/deployments/gpt-4/models?api-version=2024-12-01"
+        );
     }
 
     #[test]

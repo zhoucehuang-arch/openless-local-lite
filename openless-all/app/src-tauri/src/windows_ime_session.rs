@@ -90,26 +90,10 @@ impl WindowsImeSessionController {
     pub fn prepare_session(&self) -> PreparedWindowsImeSession {
         #[cfg(target_os = "windows")]
         {
-            let saved_profile = match self.profile_manager.capture_active_profile() {
-                Ok(snapshot) => snapshot,
-                Err(error) => {
-                    let error = WindowsImeSessionError::Profile(error.to_string());
-                    log::warn!("[windows-ime] capture active profile failed: {error}");
-                    return PreparedWindowsImeSession::unavailable();
-                }
-            };
-
-            match self.profile_manager.activate_openless_profile() {
-                Ok(()) => PreparedWindowsImeSession {
-                    saved_profile: Some(saved_profile),
-                    openless_activated: true,
-                },
-                Err(error) => {
-                    let error = WindowsImeSessionError::Profile(error.to_string());
-                    log::warn!("[windows-ime] activate OpenLess profile failed: {error}");
-                    PreparedWindowsImeSession::activation_failed(saved_profile)
-                }
-            }
+            log::info!(
+                "[windows-ime] Lite build skips TSF profile activation; using Unicode insertion"
+            );
+            PreparedWindowsImeSession::unavailable()
         }
 
         #[cfg(not(target_os = "windows"))]

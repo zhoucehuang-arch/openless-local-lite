@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "OpenLess Local",
-  "version": "1.0.0-local.0",
+  "version": "1.0.0-local.1",
   "identifier": "com.openless.local",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -80,17 +80,7 @@
     },
     "windows": {
       "nsis": {
-        "installMode": "perMachine",
-        "installerHooks": "nsis/openless-ime-hooks.nsh"
-      },
-      "wix": {
-        "fragmentPaths": [
-          "wix/openless-ime.wxs"
-        ],
-        "componentRefs": [
-          "OpenLessImeDllX64Component",
-          "OpenLessImeDllX86Component"
-        ]
+        "installMode": "currentUser"
       }
     }
   }

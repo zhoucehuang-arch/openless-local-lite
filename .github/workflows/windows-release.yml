@@ -6,7 +6,7 @@ on:
       tag:
         description: Release tag to create
         required: true
-        default: openless-local-lite-v1.0.0-local.0
+        default: openless-local-lite-v1.0.0-local.1
       prerelease:
         description: Mark this release as prerelease
         required: true
@@ -48,31 +48,6 @@ jobs:
       - name: Build frontend
         run: npm run build
 
-      - name: Build x64/x86 TSF IME DLLs
-        shell: pwsh
-        run: |
-          $imeRoot = Join-Path $PWD "src-tauri/target/windows-ime-msvc"
-          $targets = @(
-            @{ Platform = "x64"; Folder = "x64"; EnvName = "OPENLESS_IME_DLL_X64" },
-            @{ Platform = "Win32"; Folder = "x86"; EnvName = "OPENLESS_IME_DLL_X86" }
-          )
-
-          foreach ($target in $targets) {
-            $outDir = Join-Path $imeRoot "$($target.Folder)/Release"
-            $intDir = Join-Path $imeRoot "obj/$($target.Folder)/Release"
-            ./scripts/windows-ime-build.ps1 `
-              -Configuration Release `
-              -Platform $target.Platform `
-              -OutputDirectory $outDir `
-              -IntermediateDirectory $intDir
-
-            $dll = Join-Path $outDir "OpenLessIme.dll"
-            if (-not (Test-Path $dll)) {
-              throw "OpenLessIme.dll was not produced: $dll"
-            }
-            "$($target.EnvName)=$((Resolve-Path $dll).Path)" | Out-File -FilePath $env:GITHUB_ENV -Append
-          }
-
       - name: Build Windows setup exe
         run: npm run tauri -- build --target x86_64-pc-windows-msvc --bundles nsis
 
@@ -92,7 +67,7 @@ jobs:
           body: |
             OpenLess Local Lite Windows build.
 
-            This release keeps the local-first dictation, polish, style, personalization, history, and vocabulary features, and removes marketplace, updater, translation, selection QA, and community/product links.
+            This release keeps the local-first dictation, polish, style, personalization, history, and vocabulary features, removes marketplace/updater/translation/selection QA/community links, and does not install a Windows input method.
           prerelease: ${{ github.event.inputs.prerelease || false }}
           fail_on_unmatched_files: true
           files: openless-all/app/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe

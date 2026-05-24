@@ -381,6 +381,7 @@ export const ja: typeof zhCN = {
         deepseek: 'DeepSeek',
         siliconflow: 'SiliconFlow',
         openai: 'OpenAI',
+        aiInput: 'AI Input ゲートウェイ',
         gemini: 'Google Gemini',
         codexOAuth: 'Codex OAuth',
         mimo: 'Xiaomi MiMo',

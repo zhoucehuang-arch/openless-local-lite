@@ -182,6 +182,8 @@ fn transcription_url(base_url: &str) -> Result<String> {
         format!("{path}/transcriptions")
     } else if let Some(prefix) = path.strip_suffix("/chat/completions") {
         format!("{prefix}/audio/transcriptions")
+    } else if path.is_empty() {
+        "/v1/audio/transcriptions".to_string()
     } else {
         format!("{path}/audio/transcriptions")
     };
@@ -553,6 +555,14 @@ mod tests {
 
         let chunks = vec!["「".to_string(), "中文".to_string(), "」".to_string()];
         assert_eq!(join_transcript_chunks(&chunks), "「中文」");
+    }
+
+    #[test]
+    fn transcription_url_adds_v1_for_origin_only_base() {
+        assert_eq!(
+            transcription_url("https://ai.input.im").unwrap(),
+            "https://ai.input.im/v1/audio/transcriptions"
+        );
     }
 
     #[tokio::test]

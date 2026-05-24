@@ -39,6 +39,7 @@ const LLM_NAME_KEY_BY_ID: Record<string, string> = {
   deepseek: 'deepseek',
   siliconflow: 'siliconflow',
   openai: 'openai',
+  aiInput: 'aiInput',
   codex_oauth: 'codexOAuth',
   mimo: 'mimo',
   cometapi: 'cometapi',

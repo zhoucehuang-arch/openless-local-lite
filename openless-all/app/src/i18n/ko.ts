@@ -381,6 +381,7 @@ export const ko: typeof zhCN = {
         deepseek: 'DeepSeek',
         siliconflow: 'SiliconFlow',
         openai: 'OpenAI',
+        aiInput: 'AI Input 게이트웨이',
         gemini: 'Google Gemini',
         codexOAuth: 'Codex OAuth',
         mimo: 'Xiaomi MiMo',

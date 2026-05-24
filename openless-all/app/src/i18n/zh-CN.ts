@@ -377,6 +377,7 @@ export const zhCN = {
         deepseek: 'DeepSeek',
         siliconflow: '硅基流动',
         openai: 'OpenAI',
+        aiInput: 'AI Input 中转',
         gemini: 'Google Gemini',
         codexOAuth: 'Codex OAuth',
         mimo: '小米 MiMo',

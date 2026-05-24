@@ -1,7 +1,7 @@
 {
   "name": "openless-local-app",
   "private": true,
-  "version": "1.0.0-local.0",
+  "version": "1.0.0-local.1",
   "type": "module",
   "scripts": {
     "dev": "vite",

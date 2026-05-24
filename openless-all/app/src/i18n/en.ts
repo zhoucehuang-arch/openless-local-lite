@@ -379,6 +379,7 @@ export const en: typeof zhCN = {
         deepseek: 'DeepSeek',
         siliconflow: 'SiliconFlow',
         openai: 'OpenAI',
+        aiInput: 'AI Input gateway',
         gemini: 'Google Gemini',
         codexOAuth: 'Codex OAuth',
         mimo: 'Xiaomi MiMo',
