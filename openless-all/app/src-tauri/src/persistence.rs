@@ -40,6 +40,7 @@ const VOCAB_FILE: &str = "dictionary.json";
 const CORRECTION_RULES_FILE: &str = "correction-rules.json";
 const CORRECTION_NUM_TOKEN: &str = "{num}";
 const VOCAB_PRESETS_FILE: &str = "vocab-presets.json";
+const LITE_BUILTIN_STYLE_PACK_VERSION: &str = "3.0.0-lite";
 
 /// 旧版 plaintext JSON 凭据路径。仅作为迁移来源；成功写入系统凭据库后会删除。
 const LEGACY_CREDS_DIR: &str = ".openless";
@@ -1522,6 +1523,10 @@ fn migrate_style_packs_from_preferences(
                 pack.compatible_app_version = builtin.compatible_app_version.clone();
                 changed = true;
             }
+            if should_refresh_builtin_style_pack(pack, &builtin) {
+                refresh_builtin_style_pack(pack, &builtin);
+                changed = true;
+            }
             if pack.created_at.is_none() {
                 pack.created_at = Some(Utc::now().to_rfc3339());
                 changed = true;
@@ -1546,6 +1551,24 @@ fn migrate_style_packs_from_preferences(
             .then_with(|| left.name.cmp(&right.name))
     });
     changed
+}
+
+fn should_refresh_builtin_style_pack(pack: &StylePack, builtin: &StylePack) -> bool {
+    pack.kind == StylePackKind::Builtin
+        && pack.version != LITE_BUILTIN_STYLE_PACK_VERSION
+        && pack.prompt != builtin.prompt
+}
+
+fn refresh_builtin_style_pack(pack: &mut StylePack, builtin: &StylePack) {
+    let enabled = pack.enabled;
+    let active = pack.active;
+    let created_at = pack.created_at.clone();
+    let updated_at = Some(Utc::now().to_rfc3339());
+    *pack = builtin.clone();
+    pack.enabled = enabled;
+    pack.active = active;
+    pack.created_at = created_at.or_else(|| updated_at.clone());
+    pack.updated_at = updated_at;
 }
 
 fn style_pack_sort_key(pack: &StylePack) -> (u8, u8) {

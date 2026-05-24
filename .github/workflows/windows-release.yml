@@ -6,7 +6,7 @@ on:
       tag:
         description: Release tag to create
         required: true
-        default: openless-local-lite-v1.0.0-local.1
+        default: openless-local-lite-v1.0.0-local.2
       prerelease:
         description: Mark this release as prerelease
         required: true

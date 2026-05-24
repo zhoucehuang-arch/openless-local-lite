@@ -2264,61 +2264,110 @@ mod tests {
     }
 
     #[test]
-    fn structured_prompt_anchors_on_high_density_examples_and_term_protection() {
+    fn lite_prompts_are_typeless_style_silent_editors() {
+        let light = prompts::system_prompt(PolishMode::Light);
+        let structured = prompts::system_prompt(PolishMode::Structured);
+        let formal = prompts::system_prompt(PolishMode::Formal);
+
+        for prompt in [&light, &structured, &formal] {
+            assert!(prompt.contains("Typeless 风格"));
+            assert!(prompt.contains("静默") || prompt.contains("语音输入编辑器"));
+            assert!(prompt.contains("不回答"));
+            assert!(prompt.contains("不执行"));
+            assert!(prompt.contains("不引用历史") || prompt.contains("不引用历史、项目记忆"));
+            assert!(prompt.contains("热词"));
+            assert!(prompt.contains("只输出最终正文"));
+            assert!(prompt.contains("不添加"));
+            assert!(prompt.contains("不输出原文"));
+            assert!(prompt.contains("ASR"));
+        }
+    }
+
+    #[test]
+    fn lite_light_prompt_guards_against_ai_style_expansion() {
+        let prompt = prompts::system_prompt(PolishMode::Light);
+
+        assert!(prompt.contains("像用户自己打出来的文字"));
+        assert!(prompt.contains("不要像 AI 代写") || prompt.contains("不要像 AI 代写的商务模板"));
+            assert!(prompt.contains("短句就短句"));
+            assert!(prompt.contains("不总结、不展开、不把一句话改成大纲"));
+            assert!(prompt.contains("不使用空泛分析腔"));
+            assert!(prompt.contains("不添加新事实、新原因、新方案、新步骤"));
+        assert!(prompt.contains("你帮我跟小王说一下"));
+        assert!(prompt.contains("这个接口先不用动，主要是 Base URL 配错了"));
+        assert!(prompt.contains("为什么一直打不出来"));
+    }
+
+    #[test]
+    fn lite_structured_prompt_avoids_over_structuring_short_inputs() {
         let prompt = prompts::system_prompt(PolishMode::Structured);
 
-        // v2.0：八节中文序号骨架。结构化判断 + 双层格式 + 事项数规则必须靠前讲清楚。
-        assert!(prompt.contains("# 二、结构化判断（核心）"));
-        assert!(prompt.contains("# 三、双层格式"));
-        assert!(prompt.contains("第一层（主题）"));
-        assert!(prompt.contains("第二层（子项）"));
-        assert!(prompt.contains("事项仅 1 条"));
-        assert!(prompt.contains("事项 = 2 条"));
-        assert!(prompt.contains("事项 ≥ 3 条"));
+        assert!(prompt.contains("短句和单一事项保持自然段落"));
+        assert!(prompt.contains("1 个事项：输出一段自然文字"));
+        assert!(prompt.contains("用户已经给了清楚结构时，清理口癖和标点即可"));
+        assert!(prompt.contains("不为了显得专业而扩写、套模板、强制双层编号"));
+        assert!(prompt.contains("这个方案大概可以，但性能还得再看看。"));
+        assert!(prompt.contains("修好 GitHub Action 的 release"));
+    }
 
-        // 防回归：模型名、字段名、布尔值和版本号必须被显式保护。
-        assert!(prompt.contains("Claude"));
-        assert!(prompt.contains("Gemini"));
-        assert!(prompt.contains("Cappuccino"));
-        assert!(prompt.contains("Coder"));
-        assert!(prompt.contains("LongCat"));
+    #[test]
+    fn lite_formal_prompt_is_professional_without_business_padding() {
+        let prompt = prompts::system_prompt(PolishMode::Formal);
+
+        assert!(prompt.contains("正式但不做作"));
+        assert!(prompt.contains("不要把一句话扩成一封长邮件"));
+        assert!(prompt.contains("不添加承诺、原因、风险、客套、署名、日期"));
+        assert!(prompt.contains("不引入商务套话"));
+        assert!(prompt.contains("祝商祺"));
+        assert!(prompt.contains("同步一下：今天的发布可能需要延后"));
+    }
+
+    #[test]
+    fn lite_prompt_anchors_on_examples_and_term_protection() {
+        let prompt = prompts::system_prompt(PolishMode::Structured);
+
+        // Lite：结构化仍要清楚，但不能沿用上游强制双层大纲的 AI 报告味。
+        assert!(prompt.contains("# 结构规则"));
+        assert!(prompt.contains("1 个事项"));
+        assert!(prompt.contains("2 到 5 个并列事项"));
+        assert!(prompt.contains("超过 5 个事项"));
+        assert!(prompt.contains("不使用多层嵌套"));
+
+        // 防回归：字段名、缩写和常见技术词必须被显式保护。
+        assert!(prompt.contains("API"));
+        assert!(prompt.contains("Base URL"));
         assert!(prompt.contains("Secret Key"));
-        assert!(prompt.contains("true / false / null"));
-        assert!(prompt.contains("GPT-5.6"));
-        assert!(prompt.contains("**不**简写成 GPT-5、Claude 4"));
+        assert!(prompt.contains("Access Token"));
+        assert!(prompt.contains("配置 key"));
+        assert!(prompt.contains("版本号"));
 
-        // 4 个核心示例的锚点：超长 GitHub 请求、已编号工作日报、散乱长口述、AI 日报。
-        assert!(prompt.contains("帮忙给 GitHub 提个请求，主要包含以下内容："));
-        assert!(prompt.contains("代码与功能优化"));
-        assert!(prompt.contains("今天的工作小结如下："));
-        assert!(prompt.contains("Gemini 3.2 版本更名为 Gemini 3.5"));
-        assert!(prompt.contains("remote control 的参数值更改为 true"));
+        // 新样例锚点：发布任务、会议记录、短句不过度结构化。
+        assert!(prompt.contains("今天先做三件事："));
+        assert!(prompt.contains("测试 AI Input 的 Base URL"));
+        assert!(prompt.contains("刚才会里主要说了两点："));
+        assert!(prompt.contains("这个方案大概可以，但性能还得再看看。"));
     }
 
     #[test]
     fn structured_prompt_keeps_regrouping_and_no_loss_guards() {
         let prompt = prompts::system_prompt(PolishMode::Structured);
 
-        // v1.3.0 回归的关键规则：已编号 ≠ 不用改、≥3 必须重组、仅 1 条事项输出连贯段落。
+        // Lite 结构化：保留事项、不补事实，且避免短输入过度结构化。
         assert!(
-            prompt.contains("照抄原结构 = 失败"),
-            "Structured prompt 必须把照抄原结构判为失败"
-        );
-        assert!(
-            prompt.contains("输出连贯段落"),
-            "Structured prompt 必须避免短输入过度结构化（仅 1 条事项 → 连贯段落）"
-        );
-        assert!(
-            prompt.contains("不丢失任何一件事"),
+            prompt.contains("不丢事项"),
             "Structured prompt 必须明确防止事项丢失"
         );
         assert!(
-            prompt.contains("不补充用户没说过的实现方案"),
+            prompt.contains("短句和单一事项保持自然段落"),
+            "Structured prompt 必须避免短输入过度结构化（仅 1 条事项 → 连贯段落）"
+        );
+        assert!(
+            prompt.contains("不添加新事实、新原因、新方案、新步骤"),
             "Structured prompt 必须禁止替用户编造实现方案"
         );
         assert!(
-            prompt.contains("即使原文已经写成"),
-            "Structured prompt 必须显式说明已编号的输入也要重新归类"
+            prompt.contains("用户已经给了清楚结构时，清理口癖和标点即可"),
+            "Structured prompt 必须避免强行重组清楚输入"
         );
     }
 
@@ -2372,9 +2421,7 @@ mod tests {
     }
 
     #[test]
-    fn common_rules_include_auto_correction_and_natural_organization() {
-        // 只有 Raw 仍走标准 ROLE_BLOCK / COMMON_RULES / OUTPUT_BLOCK wrapper。
-        // Light / Structured / Formal 已切到 v2 PRO 自带 prompt（含独立 ASR 纠错 + 分级策略）。
+    fn raw_prompt_keeps_minimal_wrapper_and_auto_correction() {
         let raw = prompts::system_prompt(PolishMode::Raw);
         assert!(raw.contains("5) 自动纠错"), "Raw prompt 缺少自动纠错规则");
         assert!(raw.contains("根目录"), "Raw prompt 缺少根目录纠错示例");
@@ -2382,17 +2429,18 @@ mod tests {
             raw.contains("按用户的整体意图把零碎口语组织成协调、自然的书面表达"),
             "Raw prompt 缺少自然组织扩展"
         );
+    }
 
-        // v2 PRO 自带 prompt 必须共享：四/五、ASR 纠错段 + 高/低置信度分级 + 根目录词条。
+    #[test]
+    fn lite_prompts_stay_clear_of_typeless_antipatterns() {
         for mode in [PolishMode::Light, PolishMode::Structured, PolishMode::Formal] {
             let prompt = prompts::system_prompt(mode);
-            let has_asr_heading = prompt.contains("# 四、ASR 纠错") || prompt.contains("# 五、ASR 纠错");
-            assert!(has_asr_heading, "{mode:?} prompt 缺少 v2 自带 ASR 纠错段落");
-            assert!(prompt.contains("根目录"), "{mode:?} prompt 缺少根目录纠错示例");
-            assert!(
-                prompt.contains("**高置信度**") && prompt.contains("**低置信度**"),
-                "{mode:?} prompt 缺少分级置信度策略"
-            );
+            assert!(!prompt.contains("经过分析"));
+            assert!(!prompt.contains("综合来看"));
+            assert!(!prompt.contains("以下是整理后的内容"));
+            assert!(!prompt.contains("结构化整理如下"));
+            assert!(prompt.contains("不输出开头说明、整理说明、自我解释"));
+            assert!(prompt.contains("不输出原文、解释、对比"));
         }
     }
 
